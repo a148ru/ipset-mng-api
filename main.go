@@ -4,7 +4,7 @@ package main
 import (
     "fmt"
     "log"
-    "os"
+    //"os"
     "ipset-api/internal/api"
     "ipset-api/internal/auth"
     "ipset-api/internal/config"

@@ -1,4 +1,4 @@
-// internal/storage/factory.go
+// internal/storage/factory.go  (обновленная версия)
 package storage
 
 import (

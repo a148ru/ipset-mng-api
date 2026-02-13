@@ -4,7 +4,7 @@ package auth
 import (
     "errors"
     "time"
-    "ipset-api/internal/models"
+    //"ipset-api/internal/models"
     "ipset-api/internal/storage"
     
     "github.com/golang-jwt/jwt/v5"

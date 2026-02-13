@@ -14,40 +14,40 @@ services:
       - JWT_SECRET=your-secret-key-change-in-production
     volumes:
       - ./data:/root/data
-    depends_on:
-      - mysql
-      - postgres
-      - clickhouse
+#    depends_on:
+#      - mysql
+#      - postgres
+#      - clickhouse
 
-  mysql:
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: password
-      MYSQL_DATABASE: ipset
-    ports:
-      - "3306:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
+#  mysql:
+#    image: mysql:8.0
+#    environment:
+#      MYSQL_ROOT_PASSWORD: password
+#      MYSQL_DATABASE: ipset
+#    ports:
+#      - "3306:3306"
+#    volumes:
+#      - mysql_data:/var/lib/mysql
 
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: ipset
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+#  postgres:
+#    image: postgres:15
+#    environment:
+#      POSTGRES_PASSWORD: password
+#      POSTGRES_DB: ipset
+#    ports:
+#      - "5432:5432"
+#    volumes:
+#      - postgres_data:/var/lib/postgresql/data
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:latest
-    ports:
-      - "9000:9000"
-      - "8123:8123"
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
+#  clickhouse:
+#    image: clickhouse/clickhouse-server:latest
+#    ports:
+#      - "9000:9000"
+#      - "8123:8123"
+#    volumes:
+#      - clickhouse_data:/var/lib/clickhouse
 
-volumes:
-  mysql_data:
-  postgres_data:
-  clickhouse_data:
+#volumes:
+#  mysql_data:
+#  postgres_data:
+#  clickhouse_data:
