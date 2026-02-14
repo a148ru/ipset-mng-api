@@ -29,7 +29,7 @@ cp .env.example .env
 go run cmd/generate_key/main.go
 
 # Запустить с Docker
-docker-compose up -d
+docker compose up -d
 
 # Или локально
 go run cmd/server/main.go

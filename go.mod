@@ -1,6 +1,6 @@
 module ipset-api-server
 
-go 1.25.0
+go 1.21.1
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.43.0

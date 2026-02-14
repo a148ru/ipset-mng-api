@@ -1,6 +1,6 @@
 module ipset-cli
 
-go 1.24.1
+go 1.21.1
 
 require (
 	github.com/olekukonko/tablewriter v0.0.5
