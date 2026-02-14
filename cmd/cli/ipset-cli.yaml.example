@@ -1,5 +1,0 @@
-# пример конфигурационного файла
-api_url: http://localhost:8080
-token: write-you-token
-output: table
-insecure: false

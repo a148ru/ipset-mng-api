@@ -1,11 +1,15 @@
 data
 generator
 update
+new-cli
+old-cli
 cmd/cli/ipset-cli
-cmd/cli/import.go
+
 cmd/cli/import.md
 cmd/cli/main.go.bak
 cmd/cli/README.md
 cmd/cli/rules.v4
 cmd/cli/ipset
 cmd/cli/rules.sh
+api-server
+ipsetctl

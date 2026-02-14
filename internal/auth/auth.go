@@ -1,11 +1,9 @@
-// internal/auth/auth.go
 package auth
 
 import (
     "errors"
     "time"
-    //"ipset-api/internal/models"
-    "ipset-api/internal/storage"
+    "ipset-api-server/internal/storage"
     
     "github.com/golang-jwt/jwt/v5"
 )
@@ -72,3 +70,4 @@ func (m *Manager) ValidateToken(tokenString string, secret string) (string, erro
     
     return "", errors.New("invalid token")
 }
+

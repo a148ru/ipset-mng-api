@@ -1,89 +1,49 @@
-### Инструкция по использованию:
+# IPSet API Manager
 
-#### Установка зависимостей:
+Управление IPSet правилами через REST API с поддержкой различных хранилищ.
+
+## Возможности
+
+- 🔐 JWT аутентификация
+- 📦 CRUD операции для IPSet записей
+- 🗄 Поддержка различных хранилищ (файл, MySQL, PostgreSQL, ClickHouse)
+- 🔍 Поиск по контексту
+- 📤 Импорт из существующих ipset файлов
+- 📥 Экспорт в ipset формат
+- 🐳 Docker поддержка
+- 🖥 Удобный CLI интерфейс
+
+## Быстрый старт
+
+### Запуск сервера
 
 ```bash
-go mod tidy
-```
+# Клонировать репозиторий
+git clone https://github.com/yourusername/ipset-api.git
+cd ipset-api
 
-#### Настройка окружения:
-
-```bash
+# Скопировать конфигурацию
 cp .env.example .env
-# Отредактируйте .env файл под ваши нужды
-```
 
-#### Генерация API ключа:
-
-```bash
+# Сгенерировать API ключ
 go run cmd/generate_key/main.go
+
+# Запустить с Docker
+docker-compose up -d
+
+# Или локально
+go run cmd/server/main.go
 ```
 
-#### Запуск сервера:
+# Установка CLI
 
 ```bash
-go run main.go
-```
+# Собрать CLI
+cd cmd/cli
+go build -o ipset-cli
+sudo mv ipset-cli /usr/local/bin/
 
-#### Использование API:
-
-- Логин и получение JWT токена:
-
-```bash
-curl -X POST http://localhost:8080/login \
-  -H "Content-Type: application/json" \
-  -d '{"api_key":"your-generated-api-key"}'
-```
-
-- Создание записи:
-
-```bash
-curl -X POST http://localhost:8080/records \
-  -H "Authorization: Bearer your-jwt-token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "ip": "192.168.1.1",
-    "cidr": "32",
-    "port": 80,
-    "protocol": "tcp",
-    "description": "Web server",
-    "context": "production web server"
-  }'
-```
-
-- Получение всех записей:
-
-```bash
-curl -X GET http://localhost:8080/records \
-  -H "Authorization: Bearer your-jwt-token"
-```
-
-- Получение записи по ID:
-
-```bash
-curl -X GET http://localhost:8080/records/100001 \
-  -H "Authorization: Bearer your-jwt-token"
-```
-
-- Поиск записей:
-
-```bash
-curl -X GET "http://localhost:8080/records/search?q=web" \
-  -H "Authorization: Bearer your-jwt-token"
-```
-
-- Обновление записи:
-
-```bash
-curl -X PUT http://localhost:8080/records/100001 \
-  -H "Authorization: Bearer your-jwt-token" \
-  -H "Content-Type: application/json" \
-  -d '{"description": "Updated web server"}'
-```
-
-- Удаление записи:
-
-```bash
-curl -X DELETE http://localhost:8080/records/100001 \
-  -H "Authorization: Bearer your-jwt-token"
+# Настроить
+ipset-cli config set api_url http://localhost:8080
+ipset-cli login your-api-key-here
 ```

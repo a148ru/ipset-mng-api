@@ -1,4 +1,3 @@
-// internal/storage/file_storage.go
 package storage
 
 import (
@@ -6,12 +5,21 @@ import (
     "fmt"
     "os"
     "sync"
-    "ipset-api/internal/models"
+    "time"
+    "ipset-api-server/internal/models"
+    "strings"
 )
-
+// FileKeyStorage - реализация для хранения ключей в файле
 type FileKeyStorage struct {
     filePath string
     mu       sync.RWMutex
+}
+
+// FileIPSetStorage - реализация для хранения ipset записей в файле
+type FileIPSetStorage struct {
+    filePath string
+    mu       sync.RWMutex
+    nextID   int
 }
 
 func NewFileKeyStorage(filePath string) (*FileKeyStorage, error) {
@@ -104,13 +112,6 @@ func (s *FileKeyStorage) ListKeys() ([]*models.AuthKey, error) {
     return result, nil
 }
 
-// FileIPSetStorage
-type FileIPSetStorage struct {
-    filePath string
-    mu       sync.RWMutex
-    nextID   int
-}
-
 func NewFileIPSetStorage(filePath string) (*FileIPSetStorage, error) {
     if err := os.MkdirAll("data", 0755); err != nil {
         return nil, err
@@ -176,7 +177,11 @@ func (s *FileIPSetStorage) Create(record *models.IPSetRecord) error {
         s.nextID++
     }
     
+    now := time.Now()
+    record.CreatedAt = now
+    record.UpdatedAt = now
     records[record.ID] = record
+    
     return s.writeRecords(records)
 }
 
@@ -208,18 +213,76 @@ func (s *FileIPSetStorage) GetAll() ([]*models.IPSetRecord, error) {
     return result, nil
 }
 
+func (s *FileIPSetStorage) GetBySetName(setName string) ([]*models.IPSetRecord, error) {
+    records, err := s.readRecords()
+    if err != nil {
+        return nil, err
+    }
+    
+    var result []*models.IPSetRecord
+    for _, record := range records {
+        if record.SetName == setName {
+            result = append(result, record)
+        }
+    }
+    
+    if len(result) == 0 {
+        return nil, fmt.Errorf("set %s not found", setName)
+    }
+    
+    return result, nil
+}
+
+func (s *FileIPSetStorage) GetAllSets() ([]*models.IPSetSet, error) {
+    records, err := s.readRecords()
+    if err != nil {
+        return nil, err
+    }
+    
+    setMap := make(map[string]*models.IPSetSet)
+    
+    for _, record := range records {
+        if set, exists := setMap[record.SetName]; exists {
+            set.Records = append(set.Records, *record)
+            if record.UpdatedAt.After(set.UpdatedAt) {
+                set.UpdatedAt = record.UpdatedAt
+            }
+        } else {
+            setMap[record.SetName] = &models.IPSetSet{
+                Name:      record.SetName,
+                Type:      record.SetType,
+                Options:   record.SetOptions,
+                Records:   []models.IPSetRecord{*record},
+                CreatedAt: record.CreatedAt,
+                UpdatedAt: record.UpdatedAt,
+            }
+        }
+    }
+    
+    result := make([]*models.IPSetSet, 0, len(setMap))
+    for _, set := range setMap {
+        result = append(result, set)
+    }
+    
+    return result, nil
+}
+
 func (s *FileIPSetStorage) Update(id int, record *models.IPSetRecord) error {
     records, err := s.readRecords()
     if err != nil {
         return err
     }
     
-    if _, exists := records[id]; !exists {
+    existing, exists := records[id]
+    if !exists {
         return fmt.Errorf("record with id %d not found", id)
     }
     
     record.ID = id
+    record.CreatedAt = existing.CreatedAt
+    record.UpdatedAt = time.Now()
     records[id] = record
+    
     return s.writeRecords(records)
 }
 
@@ -237,34 +300,44 @@ func (s *FileIPSetStorage) Delete(id int) error {
     return s.writeRecords(records)
 }
 
-func (s *FileIPSetStorage) Search(context string) ([]*models.IPSetRecord, error) {
+func (s *FileIPSetStorage) DeleteSet(setName string) error {
+    records, err := s.readRecords()
+    if err != nil {
+        return err
+    }
+    
+    found := false
+    for id, record := range records {
+        if record.SetName == setName {
+            delete(records, id)
+            found = true
+        }
+    }
+    
+    if !found {
+        return fmt.Errorf("set %s not found", setName)
+    }
+    
+    return s.writeRecords(records)
+}
+
+func (s *FileIPSetStorage) Search(query string) ([]*models.IPSetRecord, error) {
     records, err := s.readRecords()
     if err != nil {
         return nil, err
     }
     
     var result []*models.IPSetRecord
+    query = strings.ToLower(query)
+    
     for _, record := range records {
-        if contains(record.Context, context) || contains(record.Description, context) {
+        if strings.Contains(strings.ToLower(record.Context), query) ||
+           strings.Contains(strings.ToLower(record.Description), query) ||
+           strings.Contains(strings.ToLower(record.IP), query) ||
+           strings.Contains(strings.ToLower(record.SetName), query) {
             result = append(result, record)
         }
     }
     
     return result, nil
-}
-
-func contains(s, substr string) bool {
-    return len(substr) == 0 || (len(s) >= len(substr) && s != "" && substr != "" && 
-           (s == substr || (len(s) > len(substr) && 
-           (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || 
-            containsMiddle(s, substr)))))
-}
-
-func containsMiddle(s, substr string) bool {
-    for i := 1; i <= len(s)-len(substr); i++ {
-        if s[i:i+len(substr)] == substr {
-            return true
-        }
-    }
-    return false
 }

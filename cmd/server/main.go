@@ -1,14 +1,12 @@
-// main.go
 package main
 
 import (
     "fmt"
     "log"
-    //"os"
-    "ipset-api/internal/api"
-    "ipset-api/internal/auth"
-    "ipset-api/internal/config"
-    "ipset-api/internal/storage"
+    "ipset-api-server/internal/api"
+    "ipset-api-server/internal/auth"
+    "ipset-api-server/internal/config"
+    "ipset-api-server/internal/storage"
     
     "github.com/joho/godotenv"
 )
@@ -45,3 +43,4 @@ func main() {
         log.Fatal(err)
     }
 }
+

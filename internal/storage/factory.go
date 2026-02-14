@@ -1,9 +1,8 @@
-// internal/storage/factory.go  (обновленная версия)
 package storage
 
 import (
     "fmt"
-    "ipset-api/internal/config"
+    "ipset-api-server/internal/config"
 )
 
 func NewKeyStorage(storageType string, cfg *config.Config) (KeyStorage, error) {
@@ -35,3 +34,4 @@ func NewIPSetStorage(storageType string, cfg *config.Config) (IPSetStorage, erro
         return nil, fmt.Errorf("unsupported storage type: %s", storageType)
     }
 }
+

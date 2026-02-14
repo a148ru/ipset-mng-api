@@ -1,8 +1,7 @@
-// internal/storage/interface.go
 package storage
 
 import (
-    "ipset-api/internal/models"
+    "ipset-api-server/internal/models"
 )
 
 type KeyStorage interface {
@@ -16,7 +15,11 @@ type IPSetStorage interface {
     Create(record *models.IPSetRecord) error
     GetByID(id int) (*models.IPSetRecord, error)
     GetAll() ([]*models.IPSetRecord, error)
+    GetBySetName(setName string) ([]*models.IPSetRecord, error)
+    GetAllSets() ([]*models.IPSetSet, error)
     Update(id int, record *models.IPSetRecord) error
     Delete(id int) error
-    Search(context string) ([]*models.IPSetRecord, error)
+    DeleteSet(setName string) error
+    Search(query string) ([]*models.IPSetRecord, error)
 }
+

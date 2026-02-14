@@ -1,13 +1,12 @@
-// cmd/generate_key/main.go
 package main
 
 import (
     "fmt"
     "log"
     "time"
-    "ipset-api/internal/config"
-    "ipset-api/internal/models"
-    "ipset-api/internal/storage"
+    "ipset-api-server/internal/config"
+    "ipset-api-server/internal/models"
+    "ipset-api-server/internal/storage"
     
     "github.com/google/uuid"
 )
