@@ -1,15 +1,16 @@
 module ipset-api-server
 
-go 1.21.1
+go 1.21
 
 require (
-	github.com/ClickHouse/clickhouse-go/v2 v2.43.0
-	github.com/gin-gonic/gin v1.11.0
-	github.com/go-sql-driver/mysql v1.9.3
-	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/ClickHouse/clickhouse-go/v2 v2.15.0
+	github.com/gin-gonic/gin v1.9.1
+	github.com/go-sql-driver/mysql v1.7.1
+	github.com/golang-jwt/jwt/v5 v5.0.0
 	github.com/joho/godotenv v1.5.1
-	github.com/lib/pq v1.11.2
+	github.com/lib/pq v1.10.9
 )
+
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect

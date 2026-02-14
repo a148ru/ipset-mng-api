@@ -1,5 +1,5 @@
 module ipset-api-generator-key
 
-go 1.21.1
+go 1.21
 
 require github.com/google/uuid v1.6.0
