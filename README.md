@@ -19,7 +19,7 @@
 
 ```bash
 # Клонировать репозиторий
-git clone https://github.com/yourusername/ipset-api.git
+git clone https://github.com/a148ru/ipset-mng-api
 cd ipset-api
 
 # Скопировать конфигурацию
