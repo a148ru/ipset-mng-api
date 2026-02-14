@@ -168,8 +168,164 @@ if [ ! -z "$record" ]; then
     ipset-cli records get $id --output yaml
 fi
 ```
+#### Примеры использования команд импорта:
 
-- Алиасы для удобства:
+- Импорт из /etc/ipset:
+
+```bash
+# Импорт всех правил из /etc/ipset
+ipset-cli import etc
+
+# Импорт с префиксом контекста
+ipset-cli import etc --context-prefix "production"
+
+# Просмотр что будет импортировано без фактического импорта
+ipset-cli import etc --dry-run
+```
+
+- Импорт из произвольного файла:
+
+```bash
+# Импорт из файла с правилами
+ipset-cli import file /path/to/ipset.rules
+
+# Импорт из файла с префиксом
+ipset-cli import file backup.rules --context-prefix "backup-2024"
+```
+
+- Импорт из stdin:
+
+```bash
+# Через пайп
+cat /etc/ipset | ipset-cli import stdin
+
+# Из вывода другой команды
+ipset save | ipset-cli import stdin
+```
+
+- Импорт из текущей системы:
+
+```bash
+# Импорт всех правил из всех set
+ipset-cli import system
+
+# Импорт из конкретного set
+ipset-cli import system myset
+
+# Импорт с префиксом
+ipset-cli import system --context-prefix "live-system"
+```
+
+- Импорт из всех доступных источников:
+
+```bash
+# Попытаться импортировать из всех возможных источников
+ipset-cli import all
+
+# Просмотр что будет импортировано
+ipset-cli import all --dry-run
+```
+
+#### Примеры вывода:
+
+- Dry run режим:
+```bash
+$ ipset-cli import etc --dry-run
+Found 5 rules to import
+
+DRY RUN - Rules that would be imported:
+
+--- Rule 1 ---
+  IP: 192.168.1.100
+  Port: 80
+  Protocol: tcp
+  Set: webservers
+  Context: etc:webservers:192.168.1.100:80:tcp
+  Description: Imported from /etc/ipset line 42
+
+--- Rule 2 ---
+  IP: 10.0.0.5
+  CIDR: 32
+  Set: internal
+  Context: etc:internal:10.0.0.5
+  Description: Imported from /etc/ipset line 43
+```
+
+- Реальный импорт:
+```bash
+$ ipset-cli import etc
+Found 5 rules to import
+✅ Imported 192.168.1.100:80
+✅ Imported 10.0.0.5
+❌ Failed to import 192.168.1.200: API error (409): duplicate entry
+✅ Imported 172.16.0.1:443
+✅ Imported 8.8.8.8
+
+Import completed: 4 successful, 1 failed
+```
+
+- Импорт из всех источников:
+
+```bash
+$ ipset-cli import all
+Found 8 rules from sources: /etc/ipset, running system
+✅ Imported 192.168.1.100:80
+✅ Imported 10.0.0.5
+✅ Imported 192.168.1.200:443
+✅ Imported 172.16.0.1:53
+✅ Imported 8.8.8.8
+✅ Imported 1.1.1.1
+
+Import completed: 6 successful, 0 failed
+```
+#### Поддерживаемые форматы импорта:
+
+- Формат save/restore:
+
+```text
+add webservers 192.168.1.100,tcp:80
+add internal 10.0.0.5
+add blacklist 1.1.1.1
+```
+- Формат команд:
+
+```bash
+ipset add webservers 192.168.1.100,tcp:80
+ipset add internal 10.0.0.5
+ipset create blacklist hash:ip
+```
+
+- Смешанный формат:
+
+```text
+# Комментарии игнорируются
+create webservers hash:ip,port
+add webservers 192.168.1.100,tcp:80
+add webservers 192.168.1.101,tcp:443
+```
+
+- Вывод ipset save:
+
+```text
+create webservers hash:ip,port family inet hashsize 1024 maxelem 65536
+add webservers 192.168.1.100,tcp:80
+add webservers 192.168.1.101,tcp:443
+```
+
+- Полезные комбинации:
+```bash
+# Бэкап и импорт
+ipset save > /tmp/ipset-backup
+ipset-cli import file /tmp/ipset-backup --context-prefix "backup"
+
+# Миграция с одного сервера на другой
+ssh old-server "ipset save" | ipset-cli import stdin --context-prefix "migrated"
+
+# Импорт с преобразованием
+ipset save | grep -v "create" | ipset-cli import stdin
+```
+
+#### Алиасы для удобства:
 ```bash
 # Добавить в ~/.bashrc или ~/.zshrc
 alias ipset-list='ipset-cli records list'
@@ -179,19 +335,3 @@ alias ipset-export='ipset-cli export'
 alias ipset-json='ipset-cli --output json records list'
 alias ipset-yaml='ipset-cli --output yaml records list'
 ```
-
-CLI приложение предоставляет:
-
-✅ Полный набор команд для управления записями
-
-✅ Поддержка JSON, YAML, табличного и ipset форматов
-
-✅ Сохранение конфигурации (токен, URL, настройки)
-
-✅ Цветной табличный вывод
-
-✅ Экспорт в готовые ipset правила
-
-✅ Автоматическое создание ipset sets
-
-✅ Интуитивный интерфейс командной строки
