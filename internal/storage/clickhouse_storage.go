@@ -1,4 +1,3 @@
-// internal/storage/clickhouse_storage.go
 package storage
 
 import (

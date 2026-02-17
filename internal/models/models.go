@@ -35,32 +35,6 @@ type IPSetSet struct {
     UpdatedAt   time.Time      `json:"updated_at"`
 }
 
-/*
-type CreateIPSetRequest struct {
-    SetName     string `json:"set_name" binding:"required"`
-    IP          string `json:"ip" binding:"required"`
-    CIDR        string `json:"cidr"`
-    Port        int    `json:"port"`
-    Protocol    string `json:"protocol"`
-    Description string `json:"description"`
-    Context     string `json:"context" binding:"required"`
-    SetType     string `json:"set_type"`
-    SetOptions  string `json:"set_options"`
-}
-*/
-
-/* type UpdateIPSetRequest struct {
-    SetName     string `json:"set_name"`
-    IP          string `json:"ip"`
-    CIDR        string `json:"cidr"`
-    Port        int    `json:"port"`
-    Protocol    string `json:"protocol"`
-    Description string `json:"description"`
-    Context     string `json:"context"`
-    SetType     string `json:"set_type"`
-    SetOptions  string `json:"set_options"`
-} */
-
 type ImportResult struct {
     SetName     string   `json:"set_name"`
     Records     int      `json:"records"`

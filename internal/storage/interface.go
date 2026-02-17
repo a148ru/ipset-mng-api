@@ -1,4 +1,3 @@
-// internal/storage/interface.go (исправленный)
 package storage
 
 import (

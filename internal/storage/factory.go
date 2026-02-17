@@ -1,4 +1,3 @@
-// internal/storage/factory.go (исправленный)
 package storage
 
 import (

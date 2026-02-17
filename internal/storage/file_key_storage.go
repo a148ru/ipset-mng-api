@@ -1,4 +1,3 @@
-// internal/storage/file_key_storage.go
 package storage
 
 import (

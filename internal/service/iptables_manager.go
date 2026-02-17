@@ -1,4 +1,3 @@
-// internal/service/iptables_manager.go
 package service
 
 import (
