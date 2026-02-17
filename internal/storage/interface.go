@@ -1,3 +1,4 @@
+// internal/storage/interface.go (исправленный)
 package storage
 
 import (
@@ -12,14 +13,31 @@ type KeyStorage interface {
 }
 
 type IPSetStorage interface {
-    Create(record *models.IPSetRecord) error
-    GetByID(id int) (*models.IPSetRecord, error)
-    GetAll() ([]*models.IPSetRecord, error)
-    GetBySetName(setName string) ([]*models.IPSetRecord, error)
-    GetAllSets() ([]*models.IPSetSet, error)
-    Update(id int, record *models.IPSetRecord) error
-    Delete(id int) error
-    DeleteSet(setName string) error
-    Search(query string) ([]*models.IPSetRecord, error)
+    // Методы для IPSetRecord (существующие)
+    CreateRecord(record *models.IPSetRecord) error
+    GetRecordByID(id int) (*models.IPSetRecord, error)
+    GetAllRecords() ([]*models.IPSetRecord, error)
+    UpdateRecord(id int, record *models.IPSetRecord) error
+    DeleteRecord(id int) error
+    SearchRecords(context string) ([]*models.IPSetRecord, error)
+    
+    // Методы для управления ipset
+    CreateIPSet(set *models.IPSet) error
+    GetIPSet(name string) (*models.IPSet, error)
+    GetAllIPSets() ([]*models.IPSet, error)
+    UpdateIPSet(name string, set *models.IPSet) error
+    DeleteIPSet(name string) error
+    AddIPSetEntry(setName string, entry *models.IPSetEntry) error
+    RemoveIPSetEntry(entryID int) error
+    GetIPSetEntries(setName string) ([]*models.IPSetEntry, error)
+    SearchIPSets(query string) ([]*models.IPSet, error)
+    
+    // Методы для управления iptables правилами
+    CreateIPTablesRule(rule *models.IPTablesRule) error
+    GetIPTablesRule(id int) (*models.IPTablesRule, error)
+    GetAllIPTablesRules() ([]*models.IPTablesRule, error)
+    UpdateIPTablesRule(id int, rule *models.IPTablesRule) error
+    DeleteIPTablesRule(id int) error
+    ReorderIPTablesRule(id int, newPosition int) error
+    SearchIPTablesRules(query string) ([]*models.IPTablesRule, error)
 }
-

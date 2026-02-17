@@ -1,7 +1,9 @@
+// internal/storage/postgresql_storage.go
 package storage
 
 import (
     "database/sql"
+    "encoding/json"
     "fmt"
     "time"
     "ipset-api-server/internal/config"
@@ -10,13 +12,12 @@ import (
     _ "github.com/lib/pq"
 )
 
-// PostgreSQLKeyStorage - реализация для хранения ключей в PostgreSQL
 type PostgreSQLKeyStorage struct {
     db *sql.DB
 }
 
 func NewPostgreSQLKeyStorage(cfg *config.Config) (*PostgreSQLKeyStorage, error) {
-    dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+    connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
         cfg.PostgreSQLHost,
         cfg.PostgreSQLPort,
         cfg.PostgreSQLUsername,
@@ -24,31 +25,30 @@ func NewPostgreSQLKeyStorage(cfg *config.Config) (*PostgreSQLKeyStorage, error) 
         cfg.PostgreSQLDatabase,
     )
     
-    db, err := sql.Open("postgres", dsn)
+    db, err := sql.Open("postgres", connStr)
     if err != nil {
-        return nil, fmt.Errorf("failed to connect to postgresql: %v", err)
+        return nil, err
     }
     
     if err := db.Ping(); err != nil {
-        return nil, fmt.Errorf("failed to ping postgresql: %v", err)
+        return nil, err
     }
     
     // Создаем таблицу если не существует
     _, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS auth_keys (
             key VARCHAR(255) PRIMARY KEY,
-            created_at TIMESTAMP WITH TIME ZONE,
-            expires_at TIMESTAMP WITH TIME ZONE,
-            is_active BOOLEAN DEFAULT true
+            created_at TIMESTAMP,
+            expires_at TIMESTAMP,
+            is_active BOOLEAN
         )
     `)
     if err != nil {
-        return nil, fmt.Errorf("failed to create auth_keys table: %v", err)
+        return nil, err
     }
     
     return &PostgreSQLKeyStorage{db: db}, nil
 }
-
 
 func (s *PostgreSQLKeyStorage) GetKey(key string) (*models.AuthKey, error) {
     var authKey models.AuthKey
@@ -61,7 +61,7 @@ func (s *PostgreSQLKeyStorage) GetKey(key string) (*models.AuthKey, error) {
         return nil, nil
     }
     if err != nil {
-        return nil, fmt.Errorf("failed to get key: %v", err)
+        return nil, err
     }
     
     return &authKey, nil
@@ -69,30 +69,21 @@ func (s *PostgreSQLKeyStorage) GetKey(key string) (*models.AuthKey, error) {
 
 func (s *PostgreSQLKeyStorage) SaveKey(key *models.AuthKey) error {
     _, err := s.db.Exec(
-        `INSERT INTO auth_keys (key, created_at, expires_at, is_active) 
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (key) DO UPDATE 
-         SET created_at = $2, expires_at = $3, is_active = $4`,
+        "INSERT INTO auth_keys (key, created_at, expires_at, is_active) VALUES ($1, $2, $3, $4)",
         key.Key, key.CreatedAt, key.ExpiresAt, key.IsActive,
     )
-    if err != nil {
-        return fmt.Errorf("failed to save key: %v", err)
-    }
-    return nil
+    return err
 }
 
 func (s *PostgreSQLKeyStorage) DeleteKey(key string) error {
     _, err := s.db.Exec("DELETE FROM auth_keys WHERE key = $1", key)
-    if err != nil {
-        return fmt.Errorf("failed to delete key: %v", err)
-    }
-    return nil
+    return err
 }
 
 func (s *PostgreSQLKeyStorage) ListKeys() ([]*models.AuthKey, error) {
-    rows, err := s.db.Query("SELECT key, created_at, expires_at, is_active FROM auth_keys ORDER BY created_at DESC")
+    rows, err := s.db.Query("SELECT key, created_at, expires_at, is_active FROM auth_keys")
     if err != nil {
-        return nil, fmt.Errorf("failed to list keys: %v", err)
+        return nil, err
     }
     defer rows.Close()
     
@@ -100,7 +91,7 @@ func (s *PostgreSQLKeyStorage) ListKeys() ([]*models.AuthKey, error) {
     for rows.Next() {
         var key models.AuthKey
         if err := rows.Scan(&key.Key, &key.CreatedAt, &key.ExpiresAt, &key.IsActive); err != nil {
-            return nil, fmt.Errorf("failed to scan key: %v", err)
+            return nil, err
         }
         keys = append(keys, &key)
     }
@@ -108,14 +99,12 @@ func (s *PostgreSQLKeyStorage) ListKeys() ([]*models.AuthKey, error) {
     return keys, nil
 }
 
-// PostgreSQLIPSetStorage
 type PostgreSQLIPSetStorage struct {
-    db     *sql.DB
-    nextID int
+    db *sql.DB
 }
 
 func NewPostgreSQLIPSetStorage(cfg *config.Config) (*PostgreSQLIPSetStorage, error) {
-    dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+    connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
         cfg.PostgreSQLHost,
         cfg.PostgreSQLPort,
         cfg.PostgreSQLUsername,
@@ -123,188 +112,119 @@ func NewPostgreSQLIPSetStorage(cfg *config.Config) (*PostgreSQLIPSetStorage, err
         cfg.PostgreSQLDatabase,
     )
     
-    db, err := sql.Open("postgres", dsn)
+    db, err := sql.Open("postgres", connStr)
     if err != nil {
-        return nil, fmt.Errorf("failed to connect to postgresql: %v", err)
+        return nil, err
     }
     
     if err := db.Ping(); err != nil {
-        return nil, fmt.Errorf("failed to ping postgresql: %v", err)
+        return nil, err
     }
     
-    // Создаем таблицу если не существует
-    _, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS ipset_records (
-            id INTEGER PRIMARY KEY CHECK (id >= 100000 AND id <= 999999),
-            set_name VARCHAR(255) NOT NULL,
-            ip VARCHAR(45) NOT NULL,
+    // Создаем таблицы если не существуют
+    if err := createPostgreSQLTables(db); err != nil {
+        return nil, err
+    }
+    
+    return &PostgreSQLIPSetStorage{db: db}, nil
+}
+
+func createPostgreSQLTables(db *sql.DB) error {
+    queries := []string{
+        `CREATE TABLE IF NOT EXISTS ipset_records (
+            id INTEGER PRIMARY KEY,
+            ip VARCHAR(45),
             cidr VARCHAR(45),
             port INTEGER,
             protocol VARCHAR(10),
             description TEXT,
-            context TEXT NOT NULL,
-            set_type VARCHAR(50),
-            set_options TEXT,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        )
-    `)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create ipset_records table: %v", err)
+            context TEXT,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP
+        )`,
+        `CREATE TABLE IF NOT EXISTS ipsets (
+            name VARCHAR(255) PRIMARY KEY,
+            type VARCHAR(50),
+            family VARCHAR(10),
+            hashsize INTEGER,
+            maxelem INTEGER,
+            description TEXT,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP
+        )`,
+        `CREATE TABLE IF NOT EXISTS ipset_entries (
+            id SERIAL PRIMARY KEY,
+            ipset_name VARCHAR(255),
+            value TEXT,
+            comment TEXT,
+            created_at TIMESTAMP,
+            FOREIGN KEY (ipset_name) REFERENCES ipsets(name) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE IF NOT EXISTS iptables_rules (
+            id INTEGER PRIMARY KEY,
+            chain VARCHAR(255),
+            interface VARCHAR(255),
+            protocol VARCHAR(50),
+            src_sets TEXT,
+            dst_sets TEXT,
+            action VARCHAR(50),
+            description TEXT,
+            position INTEGER,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP
+        )`,
     }
     
-    // Создаем индексы для поиска
-    _, err = db.Exec(`
-        CREATE INDEX IF NOT EXISTS idx_ipset_records_set_name ON ipset_records(set_name);
-        CREATE INDEX IF NOT EXISTS idx_ipset_records_ip ON ipset_records(ip);
-        CREATE INDEX IF NOT EXISTS idx_ipset_records_context ON ipset_records USING gin(to_tsvector('english', context));
-        CREATE INDEX IF NOT EXISTS idx_ipset_records_description ON ipset_records USING gin(to_tsvector('english', description));
-    `)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create indexes: %v", err)
-    }
-    
-    // Создаем функцию для автоматического обновления updated_at
-    _, err = db.Exec(`
-        CREATE OR REPLACE FUNCTION update_updated_at_column()
-        RETURNS TRIGGER AS $$
-        BEGIN
-            NEW.updated_at = CURRENT_TIMESTAMP;
-            RETURN NEW;
-        END;
-        $$ language 'plpgsql';
-    `)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create function: %v", err)
-    }
-    
-    // Создаем триггер для автоматического обновления updated_at
-    _, err = db.Exec(`
-        DROP TRIGGER IF EXISTS update_ipset_records_updated_at ON ipset_records;
-        CREATE TRIGGER update_ipset_records_updated_at
-            BEFORE UPDATE ON ipset_records
-            FOR EACH ROW
-            EXECUTE FUNCTION update_updated_at_column();
-    `)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create trigger: %v", err)
-    }
-    
-    // Получаем максимальный ID для определения следующего доступного
-    var maxID sql.NullInt64
-    err = db.QueryRow("SELECT MAX(id) FROM ipset_records").Scan(&maxID)
-    if err != nil {
-        return nil, fmt.Errorf("failed to get max ID: %v", err)
-    }
-    
-    nextID := 100000
-    if maxID.Valid {
-        nextID = int(maxID.Int64) + 1
-        if nextID < 100000 {
-            nextID = 100000
+    for _, query := range queries {
+        if _, err := db.Exec(query); err != nil {
+            return err
         }
-    }
-    
-    return &PostgreSQLIPSetStorage{
-        db:     db,
-        nextID: nextID,
-    }, nil
-}
-
-func (s *PostgreSQLIPSetStorage) getNextID() (int, error) {
-    // Ищем первый свободный ID в диапазоне 100000-999999
-    var id int
-    err := s.db.QueryRow(`
-        SELECT generate_series
-        FROM generate_series(100000, 999999) AS generate_series
-        WHERE generate_series NOT IN (SELECT id FROM ipset_records)
-        ORDER BY generate_series
-        LIMIT 1
-    `).Scan(&id)
-    
-    if err == sql.ErrNoRows {
-        return 0, fmt.Errorf("no available IDs in range 100000-999999")
-    }
-    if err != nil {
-        return 0, fmt.Errorf("failed to get next ID: %v", err)
-    }
-    
-    return id, nil
-}
-
-func (s *PostgreSQLIPSetStorage) Create(record *models.IPSetRecord) error {
-    // Получаем следующий доступный ID
-    id, err := s.getNextID()
-    if err != nil {
-        return err
-    }
-    
-    record.ID = id
-    now := time.Now()
-    record.CreatedAt = now
-    record.UpdatedAt = now
-    
-    _, err = s.db.Exec(`
-        INSERT INTO ipset_records 
-        (id, set_name, ip, cidr, port, protocol, description, context, set_type, set_options, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-    `,
-        record.ID, record.SetName, record.IP, record.CIDR, record.Port, record.Protocol,
-        record.Description, record.Context, record.SetType, record.SetOptions,
-        record.CreatedAt, record.UpdatedAt,
-    )
-    
-    if err != nil {
-        return fmt.Errorf("failed to create record: %v", err)
     }
     
     return nil
 }
 
-func (s *PostgreSQLIPSetStorage) GetByID(id int) (*models.IPSetRecord, error) {
-    var record models.IPSetRecord
-    err := s.db.QueryRow(`
-        SELECT id, set_name, ip, cidr, port, protocol, description, context, 
-               set_type, set_options, created_at, updated_at
-        FROM ipset_records
-        WHERE id = $1
-    `, id).Scan(
-        &record.ID, &record.SetName, &record.IP, &record.CIDR, &record.Port, &record.Protocol,
-        &record.Description, &record.Context, &record.SetType, &record.SetOptions,
-        &record.CreatedAt, &record.UpdatedAt,
+// IPSetRecord methods
+func (s *PostgreSQLIPSetStorage) CreateRecord(record *models.IPSetRecord) error {
+    record.CreatedAt = time.Now()
+    record.UpdatedAt = time.Now()
+    
+    _, err := s.db.Exec(
+        "INSERT INTO ipset_records (id, ip, cidr, port, protocol, description, context, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        record.ID, record.IP, record.CIDR, record.Port, record.Protocol, record.Description, record.Context, record.CreatedAt, record.UpdatedAt,
     )
+    return err
+}
+
+func (s *PostgreSQLIPSetStorage) GetRecordByID(id int) (*models.IPSetRecord, error) {
+    var record models.IPSetRecord
+    err := s.db.QueryRow(
+        "SELECT id, ip, cidr, port, protocol, description, context, created_at, updated_at FROM ipset_records WHERE id = $1",
+        id,
+    ).Scan(&record.ID, &record.IP, &record.CIDR, &record.Port, &record.Protocol, &record.Description, &record.Context, &record.CreatedAt, &record.UpdatedAt)
     
     if err == sql.ErrNoRows {
         return nil, fmt.Errorf("record with id %d not found", id)
     }
     if err != nil {
-        return nil, fmt.Errorf("failed to get record: %v", err)
+        return nil, err
     }
     
     return &record, nil
 }
 
-func (s *PostgreSQLIPSetStorage) GetAll() ([]*models.IPSetRecord, error) {
-    rows, err := s.db.Query(`
-        SELECT id, set_name, ip, cidr, port, protocol, description, context, 
-               set_type, set_options, created_at, updated_at
-        FROM ipset_records
-        ORDER BY id
-    `)
+func (s *PostgreSQLIPSetStorage) GetAllRecords() ([]*models.IPSetRecord, error) {
+    rows, err := s.db.Query("SELECT id, ip, cidr, port, protocol, description, context, created_at, updated_at FROM ipset_records")
     if err != nil {
-        return nil, fmt.Errorf("failed to get all records: %v", err)
+        return nil, err
     }
     defer rows.Close()
     
     var records []*models.IPSetRecord
     for rows.Next() {
         var record models.IPSetRecord
-        if err := rows.Scan(
-            &record.ID, &record.SetName, &record.IP, &record.CIDR, &record.Port, &record.Protocol,
-            &record.Description, &record.Context, &record.SetType, &record.SetOptions,
-            &record.CreatedAt, &record.UpdatedAt,
-        ); err != nil {
-            return nil, fmt.Errorf("failed to scan record: %v", err)
+        if err := rows.Scan(&record.ID, &record.IP, &record.CIDR, &record.Port, &record.Protocol, &record.Description, &record.Context, &record.CreatedAt, &record.UpdatedAt); err != nil {
+            return nil, err
         }
         records = append(records, &record)
     }
@@ -312,186 +232,284 @@ func (s *PostgreSQLIPSetStorage) GetAll() ([]*models.IPSetRecord, error) {
     return records, nil
 }
 
-func (s *PostgreSQLIPSetStorage) GetBySetName(setName string) ([]*models.IPSetRecord, error) {
-    rows, err := s.db.Query(`
-        SELECT id, set_name, ip, cidr, port, protocol, description, context, 
-               set_type, set_options, created_at, updated_at
-        FROM ipset_records
-        WHERE set_name = $1
-        ORDER BY id
-    `, setName)
+func (s *PostgreSQLIPSetStorage) UpdateRecord(id int, record *models.IPSetRecord) error {
+    record.UpdatedAt = time.Now()
+    
+    _, err := s.db.Exec(
+        "UPDATE ipset_records SET ip = $1, cidr = $2, port = $3, protocol = $4, description = $5, context = $6, updated_at = $7 WHERE id = $8",
+        record.IP, record.CIDR, record.Port, record.Protocol, record.Description, record.Context, record.UpdatedAt, id,
+    )
+    return err
+}
+
+func (s *PostgreSQLIPSetStorage) DeleteRecord(id int) error {
+    _, err := s.db.Exec("DELETE FROM ipset_records WHERE id = $1", id)
+    return err
+}
+
+func (s *PostgreSQLIPSetStorage) SearchRecords(context string) ([]*models.IPSetRecord, error) {
+    rows, err := s.db.Query(
+        "SELECT id, ip, cidr, port, protocol, description, context, created_at, updated_at FROM ipset_records WHERE context ILIKE $1 OR description ILIKE $1",
+        "%"+context+"%",
+    )
     if err != nil {
-        return nil, fmt.Errorf("failed to get records by set name: %v", err)
+        return nil, err
     }
     defer rows.Close()
     
     var records []*models.IPSetRecord
     for rows.Next() {
         var record models.IPSetRecord
-        if err := rows.Scan(
-            &record.ID, &record.SetName, &record.IP, &record.CIDR, &record.Port, &record.Protocol,
-            &record.Description, &record.Context, &record.SetType, &record.SetOptions,
-            &record.CreatedAt, &record.UpdatedAt,
-        ); err != nil {
-            return nil, fmt.Errorf("failed to scan record: %v", err)
+        if err := rows.Scan(&record.ID, &record.IP, &record.CIDR, &record.Port, &record.Protocol, &record.Description, &record.Context, &record.CreatedAt, &record.UpdatedAt); err != nil {
+            return nil, err
         }
         records = append(records, &record)
-    }
-    
-    if len(records) == 0 {
-        return nil, fmt.Errorf("set %s not found", setName)
     }
     
     return records, nil
 }
 
-func (s *PostgreSQLIPSetStorage) GetAllSets() ([]*models.IPSetSet, error) {
-    rows, err := s.db.Query(`
-        SELECT 
-            set_name, 
-            set_type, 
-            set_options, 
-            MIN(created_at) as created_at,
-            MAX(updated_at) as updated_at,
-            COUNT(*) as record_count
-        FROM ipset_records
-        GROUP BY set_name, set_type, set_options
-        ORDER BY set_name
-    `)
+// IPSet methods
+func (s *PostgreSQLIPSetStorage) CreateIPSet(set *models.IPSet) error {
+    set.CreatedAt = time.Now()
+    set.UpdatedAt = time.Now()
+    
+    _, err := s.db.Exec(
+        "INSERT INTO ipsets (name, type, family, hashsize, maxelem, description, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        set.Name, set.Type, set.Family, set.HashSize, set.MaxElem, set.Description, set.CreatedAt, set.UpdatedAt,
+    )
+    return err
+}
+
+func (s *PostgreSQLIPSetStorage) GetIPSet(name string) (*models.IPSet, error) {
+    var set models.IPSet
+    err := s.db.QueryRow(
+        "SELECT name, type, family, hashsize, maxelem, description, created_at, updated_at FROM ipsets WHERE name = $1",
+        name,
+    ).Scan(&set.Name, &set.Type, &set.Family, &set.HashSize, &set.MaxElem, &set.Description, &set.CreatedAt, &set.UpdatedAt)
+    
+    if err == sql.ErrNoRows {
+        return nil, fmt.Errorf("ipset %s not found", name)
+    }
     if err != nil {
-        return nil, fmt.Errorf("failed to get all sets: %v", err)
+        return nil, err
+    }
+    
+    // Загружаем entries
+    entries, err := s.GetIPSetEntries(name)
+    if err != nil {
+        return nil, err
+    }
+    set.Entries = make([]models.IPSetEntry, len(entries))
+    for i, entry := range entries {
+        set.Entries[i] = *entry
+    }
+    
+    return &set, nil
+}
+
+func (s *PostgreSQLIPSetStorage) GetAllIPSets() ([]*models.IPSet, error) {
+    rows, err := s.db.Query("SELECT name, type, family, hashsize, maxelem, description, created_at, updated_at FROM ipsets")
+    if err != nil {
+        return nil, err
     }
     defer rows.Close()
     
-    var sets []*models.IPSetSet
+    var sets []*models.IPSet
     for rows.Next() {
-        set := &models.IPSetSet{
-            Records: []models.IPSetRecord{},
+        var set models.IPSet
+        if err := rows.Scan(&set.Name, &set.Type, &set.Family, &set.HashSize, &set.MaxElem, &set.Description, &set.CreatedAt, &set.UpdatedAt); err != nil {
+            return nil, err
         }
-        var recordCount int
-        err := rows.Scan(&set.Name, &set.Type, &set.Options, &set.CreatedAt, &set.UpdatedAt, &recordCount)
-        if err != nil {
-            return nil, fmt.Errorf("failed to scan set: %v", err)
-        }
-        
-        // Получаем записи для этого сета
-        records, err := s.GetBySetName(set.Name)
-        if err == nil {
-            for _, r := range records {
-                set.Records = append(set.Records, *r)
-            }
-        }
-        
-        sets = append(sets, set)
+        sets = append(sets, &set)
     }
     
     return sets, nil
 }
 
-func (s *PostgreSQLIPSetStorage) Update(id int, record *models.IPSetRecord) error {
-    result, err := s.db.Exec(`
-        UPDATE ipset_records
-        SET set_name = $1, ip = $2, cidr = $3, port = $4, protocol = $5, 
-            description = $6, context = $7, set_type = $8, set_options = $9
-        WHERE id = $10
-    `,
-        record.SetName, record.IP, record.CIDR, record.Port, record.Protocol,
-        record.Description, record.Context, record.SetType, record.SetOptions, id,
+func (s *PostgreSQLIPSetStorage) UpdateIPSet(name string, set *models.IPSet) error {
+    set.UpdatedAt = time.Now()
+    
+    _, err := s.db.Exec(
+        "UPDATE ipsets SET name = $1, type = $2, family = $3, hashsize = $4, maxelem = $5, description = $6, updated_at = $7 WHERE name = $8",
+        set.Name, set.Type, set.Family, set.HashSize, set.MaxElem, set.Description, set.UpdatedAt, name,
     )
-    
-    if err != nil {
-        return fmt.Errorf("failed to update record: %v", err)
-    }
-    
-    rowsAffected, err := result.RowsAffected()
-    if err != nil {
-        return fmt.Errorf("failed to get rows affected: %v", err)
-    }
-    
-    if rowsAffected == 0 {
-        return fmt.Errorf("record with id %d not found", id)
-    }
-    
-    return nil
+    return err
 }
 
-func (s *PostgreSQLIPSetStorage) Delete(id int) error {
-    result, err := s.db.Exec("DELETE FROM ipset_records WHERE id = $1", id)
-    if err != nil {
-        return fmt.Errorf("failed to delete record: %v", err)
-    }
-    
-    rowsAffected, err := result.RowsAffected()
-    if err != nil {
-        return fmt.Errorf("failed to get rows affected: %v", err)
-    }
-    
-    if rowsAffected == 0 {
-        return fmt.Errorf("record with id %d not found", id)
-    }
-    
-    return nil
+func (s *PostgreSQLIPSetStorage) DeleteIPSet(name string) error {
+    _, err := s.db.Exec("DELETE FROM ipsets WHERE name = $1", name)
+    return err
 }
 
-func (s *PostgreSQLIPSetStorage) DeleteSet(setName string) error {
-    result, err := s.db.Exec("DELETE FROM ipset_records WHERE set_name = $1", setName)
-    if err != nil {
-        return fmt.Errorf("failed to delete set: %v", err)
-    }
+func (s *PostgreSQLIPSetStorage) AddIPSetEntry(setName string, entry *models.IPSetEntry) error {
+    entry.CreatedAt = time.Now()
     
-    rowsAffected, err := result.RowsAffected()
-    if err != nil {
-        return fmt.Errorf("failed to get rows affected: %v", err)
-    }
+    err := s.db.QueryRow(
+        "INSERT INTO ipset_entries (ipset_name, value, comment, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
+        setName, entry.Value, entry.Comment, entry.CreatedAt,
+    ).Scan(&entry.ID)
     
-    if rowsAffected == 0 {
-        return fmt.Errorf("set %s not found", setName)
-    }
-    
-    return nil
+    return err
 }
 
-func (s *PostgreSQLIPSetStorage) Search(query string) ([]*models.IPSetRecord, error) {
-    // Используем полнотекстовый поиск PostgreSQL для лучших результатов
-    rows, err := s.db.Query(`
-        SELECT id, set_name, ip, cidr, port, protocol, description, context, 
-               set_type, set_options, created_at, updated_at
-        FROM ipset_records
-        WHERE 
-            to_tsvector('english', COALESCE(context, '')) @@ plainto_tsquery('english', $1)
-            OR to_tsvector('english', COALESCE(description, '')) @@ plainto_tsquery('english', $1)
-            OR context ILIKE '%' || $1 || '%'
-            OR description ILIKE '%' || $1 || '%'
-            OR ip ILIKE '%' || $1 || '%'
-            OR set_name ILIKE '%' || $1 || '%'
-        ORDER BY 
-            CASE 
-                WHEN set_name = $1 THEN 1
-                WHEN ip = $1 THEN 2
-                WHEN context ILIKE $1 THEN 3
-                WHEN description ILIKE $1 THEN 4
-                ELSE 5
-            END,
-            id
-    `, query)
-    
+func (s *PostgreSQLIPSetStorage) RemoveIPSetEntry(entryID int) error {
+    _, err := s.db.Exec("DELETE FROM ipset_entries WHERE id = $1", entryID)
+    return err
+}
+
+func (s *PostgreSQLIPSetStorage) GetIPSetEntries(setName string) ([]*models.IPSetEntry, error) {
+    rows, err := s.db.Query("SELECT id, ipset_name, value, comment, created_at FROM ipset_entries WHERE ipset_name = $1", setName)
     if err != nil {
-        return nil, fmt.Errorf("failed to search records: %v", err)
+        return nil, err
     }
     defer rows.Close()
     
-    var records []*models.IPSetRecord
+    var entries []*models.IPSetEntry
     for rows.Next() {
-        var record models.IPSetRecord
-        if err := rows.Scan(
-            &record.ID, &record.SetName, &record.IP, &record.CIDR, &record.Port, &record.Protocol,
-            &record.Description, &record.Context, &record.SetType, &record.SetOptions,
-            &record.CreatedAt, &record.UpdatedAt,
-        ); err != nil {
-            return nil, fmt.Errorf("failed to scan record: %v", err)
+        var entry models.IPSetEntry
+        if err := rows.Scan(&entry.ID, &entry.IPSetName, &entry.Value, &entry.Comment, &entry.CreatedAt); err != nil {
+            return nil, err
         }
-        records = append(records, &record)
+        entries = append(entries, &entry)
     }
     
-    return records, nil
+    return entries, nil
+}
+
+func (s *PostgreSQLIPSetStorage) SearchIPSets(query string) ([]*models.IPSet, error) {
+    rows, err := s.db.Query(
+        "SELECT name, type, family, hashsize, maxelem, description, created_at, updated_at FROM ipsets WHERE name ILIKE $1 OR description ILIKE $1",
+        "%"+query+"%",
+    )
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+    
+    var sets []*models.IPSet
+    for rows.Next() {
+        var set models.IPSet
+        if err := rows.Scan(&set.Name, &set.Type, &set.Family, &set.HashSize, &set.MaxElem, &set.Description, &set.CreatedAt, &set.UpdatedAt); err != nil {
+            return nil, err
+        }
+        sets = append(sets, &set)
+    }
+    
+    return sets, nil
+}
+
+// IPTables methods
+func (s *PostgreSQLIPSetStorage) CreateIPTablesRule(rule *models.IPTablesRule) error {
+    rule.CreatedAt = time.Now()
+    rule.UpdatedAt = time.Now()
+    
+    // Сериализуем массивы в JSON
+    srcSetsJSON, _ := json.Marshal(rule.SrcSets)
+    dstSetsJSON, _ := json.Marshal(rule.DstSets)
+    
+    _, err := s.db.Exec(
+        "INSERT INTO iptables_rules (id, chain, interface, protocol, src_sets, dst_sets, action, description, position, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        rule.ID, rule.Chain, rule.Interface, rule.Protocol, string(srcSetsJSON), string(dstSetsJSON), rule.Action, rule.Description, rule.Position, rule.CreatedAt, rule.UpdatedAt,
+    )
+    return err
+}
+
+func (s *PostgreSQLIPSetStorage) GetIPTablesRule(id int) (*models.IPTablesRule, error) {
+    var rule models.IPTablesRule
+    var srcSetsJSON, dstSetsJSON string
+    
+    err := s.db.QueryRow(
+        "SELECT id, chain, interface, protocol, src_sets, dst_sets, action, description, position, created_at, updated_at FROM iptables_rules WHERE id = $1",
+        id,
+    ).Scan(&rule.ID, &rule.Chain, &rule.Interface, &rule.Protocol, &srcSetsJSON, &dstSetsJSON, &rule.Action, &rule.Description, &rule.Position, &rule.CreatedAt, &rule.UpdatedAt)
+    
+    if err == sql.ErrNoRows {
+        return nil, fmt.Errorf("rule with id %d not found", id)
+    }
+    if err != nil {
+        return nil, err
+    }
+    
+    // Десериализуем JSON обратно в массивы
+    json.Unmarshal([]byte(srcSetsJSON), &rule.SrcSets)
+    json.Unmarshal([]byte(dstSetsJSON), &rule.DstSets)
+    
+    return &rule, nil
+}
+
+func (s *PostgreSQLIPSetStorage) GetAllIPTablesRules() ([]*models.IPTablesRule, error) {
+    rows, err := s.db.Query("SELECT id, chain, interface, protocol, src_sets, dst_sets, action, description, position, created_at, updated_at FROM iptables_rules")
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+    
+    var rules []*models.IPTablesRule
+    for rows.Next() {
+        var rule models.IPTablesRule
+        var srcSetsJSON, dstSetsJSON string
+        
+        if err := rows.Scan(&rule.ID, &rule.Chain, &rule.Interface, &rule.Protocol, &srcSetsJSON, &dstSetsJSON, &rule.Action, &rule.Description, &rule.Position, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
+            return nil, err
+        }
+        
+        json.Unmarshal([]byte(srcSetsJSON), &rule.SrcSets)
+        json.Unmarshal([]byte(dstSetsJSON), &rule.DstSets)
+        
+        rules = append(rules, &rule)
+    }
+    
+    return rules, nil
+}
+
+func (s *PostgreSQLIPSetStorage) UpdateIPTablesRule(id int, rule *models.IPTablesRule) error {
+    rule.UpdatedAt = time.Now()
+    
+    srcSetsJSON, _ := json.Marshal(rule.SrcSets)
+    dstSetsJSON, _ := json.Marshal(rule.DstSets)
+    
+    _, err := s.db.Exec(
+        "UPDATE iptables_rules SET chain = $1, interface = $2, protocol = $3, src_sets = $4, dst_sets = $5, action = $6, description = $7, position = $8, updated_at = $9 WHERE id = $10",
+        rule.Chain, rule.Interface, rule.Protocol, string(srcSetsJSON), string(dstSetsJSON), rule.Action, rule.Description, rule.Position, rule.UpdatedAt, id,
+    )
+    return err
+}
+
+func (s *PostgreSQLIPSetStorage) DeleteIPTablesRule(id int) error {
+    _, err := s.db.Exec("DELETE FROM iptables_rules WHERE id = $1", id)
+    return err
+}
+
+func (s *PostgreSQLIPSetStorage) ReorderIPTablesRule(id int, newPosition int) error {
+    _, err := s.db.Exec("UPDATE iptables_rules SET position = $1, updated_at = $2 WHERE id = $3", newPosition, time.Now(), id)
+    return err
+}
+
+func (s *PostgreSQLIPSetStorage) SearchIPTablesRules(query string) ([]*models.IPTablesRule, error) {
+    rows, err := s.db.Query(
+        "SELECT id, chain, interface, protocol, src_sets, dst_sets, action, description, position, created_at, updated_at FROM iptables_rules WHERE chain ILIKE $1 OR description ILIKE $1",
+        "%"+query+"%",
+    )
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+    
+    var rules []*models.IPTablesRule
+    for rows.Next() {
+        var rule models.IPTablesRule
+        var srcSetsJSON, dstSetsJSON string
+        
+        if err := rows.Scan(&rule.ID, &rule.Chain, &rule.Interface, &rule.Protocol, &srcSetsJSON, &dstSetsJSON, &rule.Action, &rule.Description, &rule.Position, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
+            return nil, err
+        }
+        
+        json.Unmarshal([]byte(srcSetsJSON), &rule.SrcSets)
+        json.Unmarshal([]byte(dstSetsJSON), &rule.DstSets)
+        
+        rules = append(rules, &rule)
+    }
+    
+    return rules, nil
 }

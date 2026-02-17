@@ -13,7 +13,9 @@ import (
 
 func main() {
     // Загружаем .env файл если существует
-    godotenv.Load()
+    if err := godotenv.Load(); err != nil {
+        log.Println("No .env file found, using environment variables")
+    }
 
     // Загружаем конфигурацию
     cfg := config.Load()
@@ -39,7 +41,7 @@ func main() {
     addr := fmt.Sprintf("%s:%s", cfg.ServerHost, cfg.ServerPort)
     log.Printf("Server starting on %s", addr)
     
-    if err := server.Run(addr); err != nil {
+    if err := server.Start(addr); err != nil { // Изменено с Run на Start
         log.Fatal(err)
     }
 }

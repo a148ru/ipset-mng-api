@@ -1,92 +1,69 @@
+// internal/storage/clickhouse_storage.go
 package storage
 
 import (
-    "context"
+    "database/sql"
+    "encoding/json"
     "fmt"
     "time"
     "ipset-api-server/internal/config"
     "ipset-api-server/internal/models"
     
-    "github.com/ClickHouse/clickhouse-go/v2"
-    "github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+    _ "github.com/ClickHouse/clickhouse-go/v2"
 )
 
-// ClickHouseKeyStorage - реализация для хранения ключей в ClickHouse
 type ClickHouseKeyStorage struct {
-    conn driver.Conn
+    db *sql.DB
 }
 
 func NewClickHouseKeyStorage(cfg *config.Config) (*ClickHouseKeyStorage, error) {
-    ctx := context.Background()
+    dsn := fmt.Sprintf("tcp://%s:%s?username=%s&password=%s&database=%s",
+        cfg.ClickHouseHost,
+        cfg.ClickHousePort,
+        cfg.ClickHouseUsername,
+        cfg.ClickHousePassword,
+        cfg.ClickHouseDatabase,
+    )
     
-    conn, err := clickhouse.Open(&clickhouse.Options{
-        Addr: []string{fmt.Sprintf("%s:%s", cfg.ClickHouseHost, cfg.ClickHousePort)},
-        Auth: clickhouse.Auth{
-            Database: cfg.ClickHouseDatabase,
-            Username: cfg.ClickHouseUsername,
-            Password: cfg.ClickHousePassword,
-        },
-        Settings: clickhouse.Settings{
-            "max_execution_time": 60,
-        },
-        DialTimeout:      time.Second * 30,
-        MaxOpenConns:     10,
-        MaxIdleConns:     5,
-        ConnMaxLifetime:  time.Hour,
-    })
-    
+    db, err := sql.Open("clickhouse", dsn)
     if err != nil {
-        return nil, fmt.Errorf("failed to connect to clickhouse: %v", err)
+        return nil, err
     }
     
-    if err := conn.Ping(ctx); err != nil {
-        return nil, fmt.Errorf("failed to ping clickhouse: %v", err)
+    if err := db.Ping(); err != nil {
+        return nil, err
     }
     
-    // Создаем базу данных если не существует
-    err = conn.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg.ClickHouseDatabase))
-    if err != nil {
-        return nil, fmt.Errorf("failed to create database: %v", err)
-    }
-    
-    // Создаем таблицу для ключей
-    err = conn.Exec(ctx, `
+    // Создаем таблицу если не существует
+    _, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS auth_keys (
             key String,
             created_at DateTime,
             expires_at DateTime,
-            is_active UInt8,
-            updated_at DateTime DEFAULT now()
-        ) ENGINE = MergeTree()
-        ORDER BY (key, created_at)
-        SETTINGS index_granularity = 8192
+            is_active UInt8
+        ) ENGINE = MergeTree() ORDER BY key
     `)
     if err != nil {
-        return nil, fmt.Errorf("failed to create auth_keys table: %v", err)
+        return nil, err
     }
     
-    return &ClickHouseKeyStorage{conn: conn}, nil
+    return &ClickHouseKeyStorage{db: db}, nil
 }
 
 func (s *ClickHouseKeyStorage) GetKey(key string) (*models.AuthKey, error) {
-    ctx := context.Background()
-    
     var authKey models.AuthKey
     var isActive uint8
     
-    err := s.conn.QueryRow(ctx, `
-        SELECT key, created_at, expires_at, is_active
-        FROM auth_keys
-        WHERE key = ?
-        ORDER BY updated_at DESC
-        LIMIT 1
-    `, key).Scan(&authKey.Key, &authKey.CreatedAt, &authKey.ExpiresAt, &isActive)
+    err := s.db.QueryRow(
+        "SELECT key, created_at, expires_at, is_active FROM auth_keys WHERE key = ?",
+        key,
+    ).Scan(&authKey.Key, &authKey.CreatedAt, &authKey.ExpiresAt, &isActive)
     
+    if err == sql.ErrNoRows {
+        return nil, nil
+    }
     if err != nil {
-        if err.Error() == "sql: no rows in result set" {
-            return nil, nil
-        }
-        return nil, fmt.Errorf("failed to get key: %v", err)
+        return nil, err
     }
     
     authKey.IsActive = isActive == 1
@@ -94,56 +71,27 @@ func (s *ClickHouseKeyStorage) GetKey(key string) (*models.AuthKey, error) {
 }
 
 func (s *ClickHouseKeyStorage) SaveKey(key *models.AuthKey) error {
-    ctx := context.Background()
-    
     isActive := uint8(0)
     if key.IsActive {
         isActive = 1
     }
     
-    err := s.conn.Exec(ctx, `
-        INSERT INTO auth_keys (key, created_at, expires_at, is_active, updated_at)
-        VALUES (?, ?, ?, ?, now())
-    `, key.Key, key.CreatedAt, key.ExpiresAt, isActive)
-    
-    if err != nil {
-        return fmt.Errorf("failed to save key: %v", err)
-    }
-    
-    return nil
+    _, err := s.db.Exec(
+        "INSERT INTO auth_keys (key, created_at, expires_at, is_active) VALUES (?, ?, ?, ?)",
+        key.Key, key.CreatedAt, key.ExpiresAt, isActive,
+    )
+    return err
 }
 
 func (s *ClickHouseKeyStorage) DeleteKey(key string) error {
-    ctx := context.Background()
-    
-    // Помечаем ключ как неактивный вместо удаления
-    err := s.conn.Exec(ctx, `
-        INSERT INTO auth_keys (key, created_at, expires_at, is_active, updated_at)
-        SELECT key, created_at, expires_at, 0, now()
-        FROM auth_keys
-        WHERE key = ?
-        ORDER BY updated_at DESC
-        LIMIT 1
-    `, key)
-    
-    if err != nil {
-        return fmt.Errorf("failed to deactivate key: %v", err)
-    }
-    
-    return nil
+    _, err := s.db.Exec("ALTER TABLE auth_keys DELETE WHERE key = ?", key)
+    return err
 }
 
 func (s *ClickHouseKeyStorage) ListKeys() ([]*models.AuthKey, error) {
-    ctx := context.Background()
-    
-    rows, err := s.conn.Query(ctx, `
-        SELECT 
-            key, created_at, expires_at, is_active
-        FROM auth_keys
-        ORDER BY key, updated_at DESC
-    `)
+    rows, err := s.db.Query("SELECT key, created_at, expires_at, is_active FROM auth_keys")
     if err != nil {
-        return nil, fmt.Errorf("failed to list keys: %v", err)
+        return nil, err
     }
     defer rows.Close()
     
@@ -151,11 +99,9 @@ func (s *ClickHouseKeyStorage) ListKeys() ([]*models.AuthKey, error) {
     for rows.Next() {
         var key models.AuthKey
         var isActive uint8
-        
         if err := rows.Scan(&key.Key, &key.CreatedAt, &key.ExpiresAt, &isActive); err != nil {
-            return nil, fmt.Errorf("failed to scan key: %v", err)
+            return nil, err
         }
-        
         key.IsActive = isActive == 1
         keys = append(keys, &key)
     }
@@ -163,180 +109,134 @@ func (s *ClickHouseKeyStorage) ListKeys() ([]*models.AuthKey, error) {
     return keys, nil
 }
 
-// ClickHouseIPSetStorage
 type ClickHouseIPSetStorage struct {
-    conn driver.Conn
+    db *sql.DB
 }
 
 func NewClickHouseIPSetStorage(cfg *config.Config) (*ClickHouseIPSetStorage, error) {
-    ctx := context.Background()
+    dsn := fmt.Sprintf("tcp://%s:%s?username=%s&password=%s&database=%s",
+        cfg.ClickHouseHost,
+        cfg.ClickHousePort,
+        cfg.ClickHouseUsername,
+        cfg.ClickHousePassword,
+        cfg.ClickHouseDatabase,
+    )
     
-    conn, err := clickhouse.Open(&clickhouse.Options{
-        Addr: []string{fmt.Sprintf("%s:%s", cfg.ClickHouseHost, cfg.ClickHousePort)},
-        Auth: clickhouse.Auth{
-            Database: cfg.ClickHouseDatabase,
-            Username: cfg.ClickHouseUsername,
-            Password: cfg.ClickHousePassword,
-        },
-        Settings: clickhouse.Settings{
-            "max_execution_time": 60,
-        },
-        DialTimeout:     time.Second * 30,
-        MaxOpenConns:    10,
-        MaxIdleConns:    5,
-        ConnMaxLifetime: time.Hour,
-    })
-    
+    db, err := sql.Open("clickhouse", dsn)
     if err != nil {
-        return nil, fmt.Errorf("failed to connect to clickhouse: %v", err)
+        return nil, err
     }
     
-    if err := conn.Ping(ctx); err != nil {
-        return nil, fmt.Errorf("failed to ping clickhouse: %v", err)
+    if err := db.Ping(); err != nil {
+        return nil, err
     }
     
-    // Создаем таблицу для ipset записей
-    err = conn.Exec(ctx, `
-        CREATE TABLE IF NOT EXISTS ipset_records (
+    // Создаем таблицы если не существуют
+    if err := createClickHouseTables(db); err != nil {
+        return nil, err
+    }
+    
+    return &ClickHouseIPSetStorage{db: db}, nil
+}
+
+func createClickHouseTables(db *sql.DB) error {
+    queries := []string{
+        `CREATE TABLE IF NOT EXISTS ipset_records (
             id UInt32,
-            set_name String,
             ip String,
             cidr String,
             port UInt16,
             protocol String,
             description String,
             context String,
-            set_type String,
-            set_options String,
             created_at DateTime,
-            updated_at DateTime,
-            is_deleted UInt8 DEFAULT 0,
-            version UInt32
-        ) ENGINE = ReplacingMergeTree(version)
-        ORDER BY (id, updated_at)
-        SETTINGS index_granularity = 8192
-    `)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create ipset_records table: %v", err)
+            updated_at DateTime
+        ) ENGINE = MergeTree() ORDER BY id`,
+        
+        `CREATE TABLE IF NOT EXISTS ipsets (
+            name String,
+            type String,
+            family String,
+            hashsize UInt32,
+            maxelem UInt32,
+            description String,
+            created_at DateTime,
+            updated_at DateTime
+        ) ENGINE = MergeTree() ORDER BY name`,
+        
+        `CREATE TABLE IF NOT EXISTS ipset_entries (
+            id UInt32,
+            ipset_name String,
+            value String,
+            comment String,
+            created_at DateTime
+        ) ENGINE = MergeTree() ORDER BY id`,
+        
+        `CREATE TABLE IF NOT EXISTS iptables_rules (
+            id UInt32,
+            chain String,
+            interface String,
+            protocol String,
+            src_sets String,
+            dst_sets String,
+            action String,
+            description String,
+            position UInt32,
+            created_at DateTime,
+            updated_at DateTime
+        ) ENGINE = MergeTree() ORDER BY id`,
     }
     
-    return &ClickHouseIPSetStorage{conn: conn}, nil
-}
-
-func (s *ClickHouseIPSetStorage) getNextID(ctx context.Context) (int, error) {
-    // Получаем максимальный ID среди активных записей
-    var maxID uint32
-    err := s.conn.QueryRow(ctx, `
-        SELECT MAX(id) 
-        FROM ipset_records 
-        WHERE is_deleted = 0
-    `).Scan(&maxID)
-    
-    if err != nil {
-        // Если ошибка из-за отсутствия данных, начинаем с 100000
-        return 100000, nil
-    }
-    
-    nextID := int(maxID) + 1
-    if nextID < 100000 {
-        nextID = 100000
-    }
-    if nextID > 999999 {
-        return 0, fmt.Errorf("no available IDs in range 100000-999999")
-    }
-    
-    return nextID, nil
-}
-
-func (s *ClickHouseIPSetStorage) Create(record *models.IPSetRecord) error {
-    ctx := context.Background()
-    
-    // Получаем следующий ID
-    id, err := s.getNextID(ctx)
-    if err != nil {
-        return err
-    }
-    
-    record.ID = id
-    now := time.Now()
-    record.CreatedAt = now
-    record.UpdatedAt = now
-    
-    err = s.conn.Exec(ctx, `
-        INSERT INTO ipset_records 
-        (id, set_name, ip, cidr, port, protocol, description, context, set_type, set_options, created_at, updated_at, is_deleted, version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-        uint32(record.ID), record.SetName, record.IP, record.CIDR, uint16(record.Port), 
-        record.Protocol, record.Description, record.Context, record.SetType, record.SetOptions,
-        record.CreatedAt, record.UpdatedAt, uint8(0), uint32(1),
-    )
-    
-    if err != nil {
-        return fmt.Errorf("failed to create record: %v", err)
+    for _, query := range queries {
+        if _, err := db.Exec(query); err != nil {
+            return err
+        }
     }
     
     return nil
 }
 
-func (s *ClickHouseIPSetStorage) GetByID(id int) (*models.IPSetRecord, error) {
-    ctx := context.Background()
+// IPSetRecord methods
+func (s *ClickHouseIPSetStorage) CreateRecord(record *models.IPSetRecord) error {
+    record.CreatedAt = time.Now()
+    record.UpdatedAt = time.Now()
     
-    var record models.IPSetRecord
-    // var isDeleted uint8
-    //var version uint32
-
-    //if isDeleted < 0 {}
-    //if version < 0 {}
-    
-    err := s.conn.QueryRow(ctx, `
-        SELECT id, set_name, ip, cidr, port, protocol, description, context, 
-               set_type, set_options, created_at, updated_at
-        FROM ipset_records
-        WHERE id = ? AND is_deleted = 0
-        ORDER BY version DESC
-        LIMIT 1
-    `, uint32(id)).Scan(
-        &record.ID, &record.SetName, &record.IP, &record.CIDR, &record.Port, &record.Protocol,
-        &record.Description, &record.Context, &record.SetType, &record.SetOptions,
-        &record.CreatedAt, &record.UpdatedAt,
+    _, err := s.db.Exec(
+        "INSERT INTO ipset_records (id, ip, cidr, port, protocol, description, context, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        record.ID, record.IP, record.CIDR, record.Port, record.Protocol, record.Description, record.Context, record.CreatedAt, record.UpdatedAt,
     )
+    return err
+}
+
+func (s *ClickHouseIPSetStorage) GetRecordByID(id int) (*models.IPSetRecord, error) {
+    var record models.IPSetRecord
+    err := s.db.QueryRow(
+        "SELECT id, ip, cidr, port, protocol, description, context, created_at, updated_at FROM ipset_records WHERE id = ?",
+        id,
+    ).Scan(&record.ID, &record.IP, &record.CIDR, &record.Port, &record.Protocol, &record.Description, &record.Context, &record.CreatedAt, &record.UpdatedAt)
     
+    if err == sql.ErrNoRows {
+        return nil, fmt.Errorf("record with id %d not found", id)
+    }
     if err != nil {
-        if err.Error() == "sql: no rows in result set" {
-            return nil, fmt.Errorf("record with id %d not found", id)
-        }
-        return nil, fmt.Errorf("failed to get record: %v", err)
+        return nil, err
     }
     
     return &record, nil
 }
 
-func (s *ClickHouseIPSetStorage) GetAll() ([]*models.IPSetRecord, error) {
-    ctx := context.Background()
-    
-    rows, err := s.conn.Query(ctx, `
-        SELECT 
-            id, set_name, ip, cidr, port, protocol, description, context, 
-            set_type, set_options, created_at, updated_at
-        FROM ipset_records
-        WHERE is_deleted = 0
-        ORDER BY id
-    `)
+func (s *ClickHouseIPSetStorage) GetAllRecords() ([]*models.IPSetRecord, error) {
+    rows, err := s.db.Query("SELECT id, ip, cidr, port, protocol, description, context, created_at, updated_at FROM ipset_records")
     if err != nil {
-        return nil, fmt.Errorf("failed to get all records: %v", err)
+        return nil, err
     }
     defer rows.Close()
     
     var records []*models.IPSetRecord
     for rows.Next() {
         var record models.IPSetRecord
-        if err := rows.Scan(
-            &record.ID, &record.SetName, &record.IP, &record.CIDR, &record.Port, &record.Protocol,
-            &record.Description, &record.Context, &record.SetType, &record.SetOptions,
-            &record.CreatedAt, &record.UpdatedAt,
-        ); err != nil {
-            return nil, fmt.Errorf("failed to scan record: %v", err)
+        if err := rows.Scan(&record.ID, &record.IP, &record.CIDR, &record.Port, &record.Protocol, &record.Description, &record.Context, &record.CreatedAt, &record.UpdatedAt); err != nil {
+            return nil, err
         }
         records = append(records, &record)
     }
@@ -344,295 +244,347 @@ func (s *ClickHouseIPSetStorage) GetAll() ([]*models.IPSetRecord, error) {
     return records, nil
 }
 
-func (s *ClickHouseIPSetStorage) GetBySetName(setName string) ([]*models.IPSetRecord, error) {
-    ctx := context.Background()
+func (s *ClickHouseIPSetStorage) UpdateRecord(id int, record *models.IPSetRecord) error {
+    record.UpdatedAt = time.Now()
     
-    rows, err := s.conn.Query(ctx, `
-        SELECT 
-            id, set_name, ip, cidr, port, protocol, description, context, 
-            set_type, set_options, created_at, updated_at
-        FROM ipset_records
-        WHERE set_name = ? AND is_deleted = 0
-        ORDER BY id
-    `, setName)
+    // ClickHouse не поддерживает UPDATE напрямую, поэтому удаляем и вставляем заново
+    tx, err := s.db.Begin()
     if err != nil {
-        return nil, fmt.Errorf("failed to get records by set name: %v", err)
+        return err
+    }
+    
+    _, err = tx.Exec("ALTER TABLE ipset_records DELETE WHERE id = ?", id)
+    if err != nil {
+        tx.Rollback()
+        return err
+    }
+    
+    _, err = tx.Exec(
+        "INSERT INTO ipset_records (id, ip, cidr, port, protocol, description, context, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        id, record.IP, record.CIDR, record.Port, record.Protocol, record.Description, record.Context, record.CreatedAt, record.UpdatedAt,
+    )
+    if err != nil {
+        tx.Rollback()
+        return err
+    }
+    
+    return tx.Commit()
+}
+
+func (s *ClickHouseIPSetStorage) DeleteRecord(id int) error {
+    _, err := s.db.Exec("ALTER TABLE ipset_records DELETE WHERE id = ?", id)
+    return err
+}
+
+func (s *ClickHouseIPSetStorage) SearchRecords(context string) ([]*models.IPSetRecord, error) {
+    // ClickHouse поддерживает полнотекстовый поиск через LIKE
+    rows, err := s.db.Query(
+        "SELECT id, ip, cidr, port, protocol, description, context, created_at, updated_at FROM ipset_records WHERE context LIKE ? OR description LIKE ?",
+        "%"+context+"%", "%"+context+"%",
+    )
+    if err != nil {
+        return nil, err
     }
     defer rows.Close()
     
     var records []*models.IPSetRecord
     for rows.Next() {
         var record models.IPSetRecord
-        if err := rows.Scan(
-            &record.ID, &record.SetName, &record.IP, &record.CIDR, &record.Port, &record.Protocol,
-            &record.Description, &record.Context, &record.SetType, &record.SetOptions,
-            &record.CreatedAt, &record.UpdatedAt,
-        ); err != nil {
-            return nil, fmt.Errorf("failed to scan record: %v", err)
+        if err := rows.Scan(&record.ID, &record.IP, &record.CIDR, &record.Port, &record.Protocol, &record.Description, &record.Context, &record.CreatedAt, &record.UpdatedAt); err != nil {
+            return nil, err
         }
         records = append(records, &record)
-    }
-    
-    if len(records) == 0 {
-        return nil, fmt.Errorf("set %s not found", setName)
     }
     
     return records, nil
 }
 
-func (s *ClickHouseIPSetStorage) GetAllSets() ([]*models.IPSetSet, error) {
-    ctx := context.Background()
+// IPSet methods
+func (s *ClickHouseIPSetStorage) CreateIPSet(set *models.IPSet) error {
+    set.CreatedAt = time.Now()
+    set.UpdatedAt = time.Now()
     
-    // Получаем уникальные сеты с агрегированной информацией
-    rows, err := s.conn.Query(ctx, `
-        SELECT 
-            set_name,
-            any(set_type) as set_type,
-            any(set_options) as set_options,
-            MIN(created_at) as created_at,
-            MAX(updated_at) as updated_at,
-            COUNT(*) as record_count
-        FROM ipset_records
-        WHERE is_deleted = 0
-        GROUP BY set_name
-        ORDER BY set_name
-    `)
+    _, err := s.db.Exec(
+        "INSERT INTO ipsets (name, type, family, hashsize, maxelem, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        set.Name, set.Type, set.Family, set.HashSize, set.MaxElem, set.Description, set.CreatedAt, set.UpdatedAt,
+    )
+    return err
+}
+
+func (s *ClickHouseIPSetStorage) GetIPSet(name string) (*models.IPSet, error) {
+    var set models.IPSet
+    err := s.db.QueryRow(
+        "SELECT name, type, family, hashsize, maxelem, description, created_at, updated_at FROM ipsets WHERE name = ?",
+        name,
+    ).Scan(&set.Name, &set.Type, &set.Family, &set.HashSize, &set.MaxElem, &set.Description, &set.CreatedAt, &set.UpdatedAt)
+    
+    if err == sql.ErrNoRows {
+        return nil, fmt.Errorf("ipset %s not found", name)
+    }
     if err != nil {
-        return nil, fmt.Errorf("failed to get all sets: %v", err)
+        return nil, err
+    }
+    
+    // Загружаем entries
+    entries, err := s.GetIPSetEntries(name)
+    if err != nil {
+        return nil, err
+    }
+    set.Entries = make([]models.IPSetEntry, len(entries))
+    for i, entry := range entries {
+        set.Entries[i] = *entry
+    }
+    
+    return &set, nil
+}
+
+func (s *ClickHouseIPSetStorage) GetAllIPSets() ([]*models.IPSet, error) {
+    rows, err := s.db.Query("SELECT name, type, family, hashsize, maxelem, description, created_at, updated_at FROM ipsets")
+    if err != nil {
+        return nil, err
     }
     defer rows.Close()
     
-    var sets []*models.IPSetSet
+    var sets []*models.IPSet
     for rows.Next() {
-        set := &models.IPSetSet{
-            Records: []models.IPSetRecord{},
+        var set models.IPSet
+        if err := rows.Scan(&set.Name, &set.Type, &set.Family, &set.HashSize, &set.MaxElem, &set.Description, &set.CreatedAt, &set.UpdatedAt); err != nil {
+            return nil, err
         }
-        var recordCount uint64
-        
-        err := rows.Scan(&set.Name, &set.Type, &set.Options, &set.CreatedAt, &set.UpdatedAt, &recordCount)
-        if err != nil {
-            return nil, fmt.Errorf("failed to scan set: %v", err)
-        }
-        
-        // Получаем записи для этого сета
-        records, err := s.GetBySetName(set.Name)
-        if err == nil {
-            for _, r := range records {
-                set.Records = append(set.Records, *r)
-            }
-        }
-        
-        sets = append(sets, set)
+        sets = append(sets, &set)
     }
     
     return sets, nil
 }
 
-func (s *ClickHouseIPSetStorage) Update(id int, record *models.IPSetRecord) error {
-    ctx := context.Background()
+func (s *ClickHouseIPSetStorage) UpdateIPSet(name string, set *models.IPSet) error {
+    set.UpdatedAt = time.Now()
     
-    // Получаем текущую версию и created_at
-    var currentVersion uint32
-    var createdAt time.Time
-    
-    err := s.conn.QueryRow(ctx, `
-        SELECT version, created_at
-        FROM ipset_records
-        WHERE id = ? AND is_deleted = 0
-        ORDER BY version DESC
-        LIMIT 1
-    `, uint32(id)).Scan(&currentVersion, &createdAt)
-    
+    tx, err := s.db.Begin()
     if err != nil {
-        if err.Error() == "sql: no rows in result set" {
-            return fmt.Errorf("record with id %d not found", id)
-        }
-        return fmt.Errorf("failed to get current version: %v", err)
+        return err
     }
     
-    record.UpdatedAt = time.Now()
-    record.CreatedAt = createdAt // Сохраняем оригинальную дату создания
+    _, err = tx.Exec("ALTER TABLE ipsets DELETE WHERE name = ?", name)
+    if err != nil {
+        tx.Rollback()
+        return err
+    }
     
-    err = s.conn.Exec(ctx, `
-        INSERT INTO ipset_records 
-        (id, set_name, ip, cidr, port, protocol, description, context, set_type, set_options, created_at, updated_at, is_deleted, version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-        uint32(id), record.SetName, record.IP, record.CIDR, uint16(record.Port), 
-        record.Protocol, record.Description, record.Context, record.SetType, record.SetOptions,
-        record.CreatedAt, record.UpdatedAt, uint8(0), currentVersion+1,
+    _, err = tx.Exec(
+        "INSERT INTO ipsets (name, type, family, hashsize, maxelem, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        set.Name, set.Type, set.Family, set.HashSize, set.MaxElem, set.Description, set.CreatedAt, set.UpdatedAt,
     )
-    
     if err != nil {
-        return fmt.Errorf("failed to update record: %v", err)
+        tx.Rollback()
+        return err
     }
     
-    return nil
+    return tx.Commit()
 }
 
-func (s *ClickHouseIPSetStorage) Delete(id int) error {
-    ctx := context.Background()
-    
-    // Получаем текущую версию и данные
-    var currentVersion uint32
-    var setName, ip, cidr, protocol, description, context, setType, setOptions string
-    var port uint16
-    var createdAt, updatedAt time.Time
-    
-    err := s.conn.QueryRow(ctx, `
-        SELECT version, set_name, ip, cidr, port, protocol, description, context, 
-               set_type, set_options, created_at, updated_at
-        FROM ipset_records
-        WHERE id = ? AND is_deleted = 0
-        ORDER BY version DESC
-        LIMIT 1
-    `, uint32(id)).Scan(&currentVersion, &setName, &ip, &cidr, &port, &protocol, 
-        &description, &context, &setType, &setOptions, &createdAt, &updatedAt)
-    
-    if err != nil {
-        if err.Error() == "sql: no rows in result set" {
-            return fmt.Errorf("record with id %d not found", id)
-        }
-        return fmt.Errorf("failed to get record for deletion: %v", err)
-    }
-    
-    // Вставляем запись с пометкой удаления
-    err = s.conn.Exec(ctx, `
-        INSERT INTO ipset_records 
-        (id, set_name, ip, cidr, port, protocol, description, context, set_type, set_options, created_at, updated_at, is_deleted, version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-        uint32(id), setName, ip, cidr, port, protocol, description, context, 
-        setType, setOptions, createdAt, time.Now(), uint8(1), currentVersion+1,
-    )
-    
-    if err != nil {
-        return fmt.Errorf("failed to delete record: %v", err)
-    }
-    
-    return nil
+func (s *ClickHouseIPSetStorage) DeleteIPSet(name string) error {
+    _, err := s.db.Exec("ALTER TABLE ipsets DELETE WHERE name = ?", name)
+    return err
 }
 
-func (s *ClickHouseIPSetStorage) DeleteSet(setName string) error {
-    ctx := context.Background()
+func (s *ClickHouseIPSetStorage) AddIPSetEntry(setName string, entry *models.IPSetEntry) error {
+    entry.CreatedAt = time.Now()
     
-    // Получаем все записи сета
-    rows, err := s.conn.Query(ctx, `
-        SELECT id, version, set_name, ip, cidr, port, protocol, description, context, 
-               set_type, set_options, created_at, updated_at
-        FROM ipset_records
-        WHERE set_name = ? AND is_deleted = 0
-    `, setName)
+    // Получаем следующий ID
+    var maxID int
+    err := s.db.QueryRow("SELECT max(id) FROM ipset_entries").Scan(&maxID)
     if err != nil {
-        return fmt.Errorf("failed to get set records for deletion: %v", err)
+        // Если таблица пустая, начинаем с 1
+        maxID = 0
+    }
+    entry.ID = maxID + 1
+    
+    _, err = s.db.Exec(
+        "INSERT INTO ipset_entries (id, ipset_name, value, comment, created_at) VALUES (?, ?, ?, ?, ?)",
+        entry.ID, setName, entry.Value, entry.Comment, entry.CreatedAt,
+    )
+    return err
+}
+
+func (s *ClickHouseIPSetStorage) RemoveIPSetEntry(entryID int) error {
+    _, err := s.db.Exec("ALTER TABLE ipset_entries DELETE WHERE id = ?", entryID)
+    return err
+}
+
+func (s *ClickHouseIPSetStorage) GetIPSetEntries(setName string) ([]*models.IPSetEntry, error) {
+    rows, err := s.db.Query("SELECT id, ipset_name, value, comment, created_at FROM ipset_entries WHERE ipset_name = ?", setName)
+    if err != nil {
+        return nil, err
     }
     defer rows.Close()
     
-    var records []struct {
-        id          uint32
-        version     uint32
-        setName     string
-        ip          string
-        cidr        string
-        port        uint16
-        protocol    string
-        description string
-        context     string
-        setType     string
-        setOptions  string
-        createdAt   time.Time
-        updatedAt   time.Time
-    }
-    
+    var entries []*models.IPSetEntry
     for rows.Next() {
-        var r struct {
-            id          uint32
-            version     uint32
-            setName     string
-            ip          string
-            cidr        string
-            port        uint16
-            protocol    string
-            description string
-            context     string
-            setType     string
-            setOptions  string
-            createdAt   time.Time
-            updatedAt   time.Time
+        var entry models.IPSetEntry
+        if err := rows.Scan(&entry.ID, &entry.IPSetName, &entry.Value, &entry.Comment, &entry.CreatedAt); err != nil {
+            return nil, err
         }
-        err := rows.Scan(&r.id, &r.version, &r.setName, &r.ip, &r.cidr, &r.port, 
-            &r.protocol, &r.description, &r.context, &r.setType, &r.setOptions, 
-            &r.createdAt, &r.updatedAt)
-        if err != nil {
-            return fmt.Errorf("failed to scan record: %v", err)
-        }
-        records = append(records, r)
+        entries = append(entries, &entry)
     }
     
-    if len(records) == 0 {
-        return fmt.Errorf("set %s not found", setName)
-    }
-    
-    // Помечаем все записи как удаленные
-    for _, r := range records {
-        err = s.conn.Exec(ctx, `
-            INSERT INTO ipset_records 
-            (id, set_name, ip, cidr, port, protocol, description, context, set_type, set_options, created_at, updated_at, is_deleted, version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-            r.id, r.setName, r.ip, r.cidr, r.port, r.protocol, r.description, r.context,
-            r.setType, r.setOptions, r.createdAt, time.Now(), uint8(1), r.version+1,
-        )
-        if err != nil {
-            return fmt.Errorf("failed to delete record %d: %v", r.id, err)
-        }
-    }
-    
-    return nil
+    return entries, nil
 }
 
-func (s *ClickHouseIPSetStorage) Search(query string) ([]*models.IPSetRecord, error) {
-    ctx := context.Background()
-    
-    // ClickHouse поддерживает полнотекстовый поиск через токенизацию
-    rows, err := s.conn.Query(ctx, `
-        SELECT 
-            id, set_name, ip, cidr, port, protocol, description, context, 
-            set_type, set_options, created_at, updated_at
-        FROM ipset_records
-        WHERE is_deleted = 0 
-            AND (positionCaseInsensitive(context, ?) > 0 
-                 OR positionCaseInsensitive(description, ?) > 0
-                 OR positionCaseInsensitive(ip, ?) > 0
-                 OR positionCaseInsensitive(set_name, ?) > 0)
-        ORDER BY 
-            CASE 
-                WHEN positionCaseInsensitive(set_name, ?) = 1 THEN 1
-                WHEN positionCaseInsensitive(ip, ?) = 1 THEN 2
-                WHEN positionCaseInsensitive(context, ?) = 1 THEN 3
-                WHEN positionCaseInsensitive(description, ?) = 1 THEN 4
-                ELSE 5
-            END,
-            id
-    `, query, query, query, query, query, query, query, query)
-    
+func (s *ClickHouseIPSetStorage) SearchIPSets(query string) ([]*models.IPSet, error) {
+    rows, err := s.db.Query(
+        "SELECT name, type, family, hashsize, maxelem, description, created_at, updated_at FROM ipsets WHERE name LIKE ? OR description LIKE ?",
+        "%"+query+"%", "%"+query+"%",
+    )
     if err != nil {
-        return nil, fmt.Errorf("failed to search records: %v", err)
+        return nil, err
     }
     defer rows.Close()
     
-    var records []*models.IPSetRecord
+    var sets []*models.IPSet
     for rows.Next() {
-        var record models.IPSetRecord
-        if err := rows.Scan(
-            &record.ID, &record.SetName, &record.IP, &record.CIDR, &record.Port, &record.Protocol,
-            &record.Description, &record.Context, &record.SetType, &record.SetOptions,
-            &record.CreatedAt, &record.UpdatedAt,
-        ); err != nil {
-            return nil, fmt.Errorf("failed to scan record: %v", err)
+        var set models.IPSet
+        if err := rows.Scan(&set.Name, &set.Type, &set.Family, &set.HashSize, &set.MaxElem, &set.Description, &set.CreatedAt, &set.UpdatedAt); err != nil {
+            return nil, err
         }
-        records = append(records, &record)
+        sets = append(sets, &set)
     }
     
-    return records, nil
+    return sets, nil
+}
+
+// IPTables methods
+func (s *ClickHouseIPSetStorage) CreateIPTablesRule(rule *models.IPTablesRule) error {
+    rule.CreatedAt = time.Now()
+    rule.UpdatedAt = time.Now()
+    
+    // Сериализуем массивы в JSON
+    srcSetsJSON, _ := json.Marshal(rule.SrcSets)
+    dstSetsJSON, _ := json.Marshal(rule.DstSets)
+    
+    _, err := s.db.Exec(
+        "INSERT INTO iptables_rules (id, chain, interface, protocol, src_sets, dst_sets, action, description, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rule.ID, rule.Chain, rule.Interface, rule.Protocol, string(srcSetsJSON), string(dstSetsJSON), rule.Action, rule.Description, rule.Position, rule.CreatedAt, rule.UpdatedAt,
+    )
+    return err
+}
+
+func (s *ClickHouseIPSetStorage) GetIPTablesRule(id int) (*models.IPTablesRule, error) {
+    var rule models.IPTablesRule
+    var srcSetsJSON, dstSetsJSON string
+    
+    err := s.db.QueryRow(
+        "SELECT id, chain, interface, protocol, src_sets, dst_sets, action, description, position, created_at, updated_at FROM iptables_rules WHERE id = ?",
+        id,
+    ).Scan(&rule.ID, &rule.Chain, &rule.Interface, &rule.Protocol, &srcSetsJSON, &dstSetsJSON, &rule.Action, &rule.Description, &rule.Position, &rule.CreatedAt, &rule.UpdatedAt)
+    
+    if err == sql.ErrNoRows {
+        return nil, fmt.Errorf("rule with id %d not found", id)
+    }
+    if err != nil {
+        return nil, err
+    }
+    
+    // Десериализуем JSON обратно в массивы
+    json.Unmarshal([]byte(srcSetsJSON), &rule.SrcSets)
+    json.Unmarshal([]byte(dstSetsJSON), &rule.DstSets)
+    
+    return &rule, nil
+}
+
+func (s *ClickHouseIPSetStorage) GetAllIPTablesRules() ([]*models.IPTablesRule, error) {
+    rows, err := s.db.Query("SELECT id, chain, interface, protocol, src_sets, dst_sets, action, description, position, created_at, updated_at FROM iptables_rules")
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+    
+    var rules []*models.IPTablesRule
+    for rows.Next() {
+        var rule models.IPTablesRule
+        var srcSetsJSON, dstSetsJSON string
+        
+        if err := rows.Scan(&rule.ID, &rule.Chain, &rule.Interface, &rule.Protocol, &srcSetsJSON, &dstSetsJSON, &rule.Action, &rule.Description, &rule.Position, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
+            return nil, err
+        }
+        
+        json.Unmarshal([]byte(srcSetsJSON), &rule.SrcSets)
+        json.Unmarshal([]byte(dstSetsJSON), &rule.DstSets)
+        
+        rules = append(rules, &rule)
+    }
+    
+    return rules, nil
+}
+
+func (s *ClickHouseIPSetStorage) UpdateIPTablesRule(id int, rule *models.IPTablesRule) error {
+    rule.UpdatedAt = time.Now()
+    
+    srcSetsJSON, _ := json.Marshal(rule.SrcSets)
+    dstSetsJSON, _ := json.Marshal(rule.DstSets)
+    
+    tx, err := s.db.Begin()
+    if err != nil {
+        return err
+    }
+    
+    _, err = tx.Exec("ALTER TABLE iptables_rules DELETE WHERE id = ?", id)
+    if err != nil {
+        tx.Rollback()
+        return err
+    }
+    
+    _, err = tx.Exec(
+        "INSERT INTO iptables_rules (id, chain, interface, protocol, src_sets, dst_sets, action, description, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        id, rule.Chain, rule.Interface, rule.Protocol, string(srcSetsJSON), string(dstSetsJSON), rule.Action, rule.Description, rule.Position, rule.CreatedAt, rule.UpdatedAt,
+    )
+    if err != nil {
+        tx.Rollback()
+        return err
+    }
+    
+    return tx.Commit()
+}
+
+func (s *ClickHouseIPSetStorage) DeleteIPTablesRule(id int) error {
+    _, err := s.db.Exec("ALTER TABLE iptables_rules DELETE WHERE id = ?", id)
+    return err
+}
+
+func (s *ClickHouseIPSetStorage) ReorderIPTablesRule(id int, newPosition int) error {
+    rule, err := s.GetIPTablesRule(id)
+    if err != nil {
+        return err
+    }
+    
+    rule.Position = newPosition
+    return s.UpdateIPTablesRule(id, rule)
+}
+
+func (s *ClickHouseIPSetStorage) SearchIPTablesRules(query string) ([]*models.IPTablesRule, error) {
+    rows, err := s.db.Query(
+        "SELECT id, chain, interface, protocol, src_sets, dst_sets, action, description, position, created_at, updated_at FROM iptables_rules WHERE chain LIKE ? OR description LIKE ?",
+        "%"+query+"%", "%"+query+"%",
+    )
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+    
+    var rules []*models.IPTablesRule
+    for rows.Next() {
+        var rule models.IPTablesRule
+        var srcSetsJSON, dstSetsJSON string
+        
+        if err := rows.Scan(&rule.ID, &rule.Chain, &rule.Interface, &rule.Protocol, &srcSetsJSON, &dstSetsJSON, &rule.Action, &rule.Description, &rule.Position, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
+            return nil, err
+        }
+        
+        json.Unmarshal([]byte(srcSetsJSON), &rule.SrcSets)
+        json.Unmarshal([]byte(dstSetsJSON), &rule.DstSets)
+        
+        rules = append(rules, &rule)
+    }
+    
+    return rules, nil
 }

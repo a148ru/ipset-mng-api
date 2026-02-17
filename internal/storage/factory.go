@@ -1,3 +1,4 @@
+// internal/storage/factory.go (исправленный)
 package storage
 
 import (
@@ -34,4 +35,3 @@ func NewIPSetStorage(storageType string, cfg *config.Config) (IPSetStorage, erro
         return nil, fmt.Errorf("unsupported storage type: %s", storageType)
     }
 }
-
