@@ -1,27 +1,39 @@
-FROM golang:1.24-alpine AS builder
+#######################
+
+# Dockerfile
+FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
+
+# Устанавливаем зависимости для сборки
+RUN apk add --no-cache gcc musl-dev
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go build -o ipset-api-server ./cmd/server/main.go
-RUN go build -o generate-key ./cmd/generate_key/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o ipset-api ./main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o generate-key ./cmd/generate_key/main.go
 
 FROM alpine:latest
 
-RUN apk --no-cache add ca-certificates
+# Устанавливаем необходимые пакеты
+RUN apk --no-cache add ca-certificates tzdata ipset iptables bash curl
 
-WORKDIR /root/
+WORKDIR /app
 
-COPY --from=builder /app/ipset-api-server .
+# Копируем бинарные файлы
+COPY --from=builder /app/ipset-api .
 COPY --from=builder /app/generate-key .
-COPY .env.example .env
 
-RUN mkdir -p data
+# Создаем директорию для данных
+RUN mkdir -p /app/data
+
+# Скрипт ожидания готовности БД
+COPY docker-entrypoint.sh /
+RUN chmod +x /docker-entrypoint.sh
 
 EXPOSE 8080
 
-CMD ["./ipset-api-server"]
-
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["./ipset-api"]

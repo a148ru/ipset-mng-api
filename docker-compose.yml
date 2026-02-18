@@ -1,57 +1,129 @@
+
+#######################
+#      - JWT_SECRET=SFwaKVdZbeMyhADftvhfz9SicPpF47UpD3zfUfq3g
+#
+#      MYSQL_ROOT_PASSWORD: q4PCPpTVT2iG
+#
+#######################
 version: '3.8'
 
 services:
+  mysql:
+    image: mysql:8.0
+    container_name: ipset-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: q4PCPpTVT2iG
+      MYSQL_DATABASE: ipset
+      MYSQL_USER: ipset_user
+      MYSQL_PASSWORD: q4PCPpTVT2iG
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ppassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - ipset-network
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15
+    container_name: ipset-postgres
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_USER: ipset_user
+      POSTGRES_DB: ipset
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ipset_user -d ipset"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - ipset-network
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: ipset-clickhouse
+    ports:
+      - "9000:9000"
+      - "8123:8123"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./docker/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - ipset-network
+    restart: unless-stopped
+
   api:
     build: .
+    container_name: ipset-api
     ports:
       - "8080:8080"
     environment:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
-      - AUTH_STORAGE_TYPE=file
-      - IPSET_STORAGE_TYPE=file
-      - JWT_SECRET=your-secret-key-change-in-production
+      - AUTH_STORAGE_TYPE=mysql
+      - IPSET_STORAGE_TYPE=mysql
+      - JWT_SECRET=SFwaKVdZbeMyhADftvhfz9SicPpF47UpD3zfUfq3g
+      
+      # MySQL settings
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=ipset
+      - MYSQL_USERNAME=ipset_user
+      - MYSQL_PASSWORD=ipset_password
+      
+      # PostgreSQL settings (если нужно переключиться)
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DATABASE=ipset
+      - POSTGRES_USERNAME=ipset_user
+      - POSTGRES_PASSWORD=password
+      
+      # ClickHouse settings
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_DATABASE=ipset
+      - CLICKHOUSE_USERNAME=default
+      - CLICKHOUSE_PASSWORD=
     volumes:
-      - ./data:/root/data
+      - ./data:/app/data
     cap_add:
-      - NET_ADMIN  # Для управления iptables
-      - SYS_MODULE # Для модулей ядра
-    network_mode: host  # Для доступа к сетевым настройкам хоста
+      - NET_ADMIN
+      - SYS_MODULE
+    networks:
+      - ipset-network
     depends_on:
-      - mysql
-#      - postgres
-#      - clickhouse
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
 
-  mysql:
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: password
-      MYSQL_DATABASE: ipset
-    ports:
-      - "3306:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-
-#  postgres:
-#    image: postgres:15
-#    environment:
-#      POSTGRES_PASSWORD: password
-#      POSTGRES_DB: ipset
-#    ports:
-#      - "5432:5432"
-#    volumes:
-#      - postgres_data:/var/lib/postgresql/data
-#
-#  clickhouse:
-#    image: clickhouse/clickhouse-server:latest
-#    ports:
-#      - "9000:9000"
-#      - "8123:8123"
-#    volumes:
-#      - clickhouse_data:/var/lib/clickhouse
+networks:
+  ipset-network:
+    driver: bridge
 
 volumes:
   mysql_data:
-#  postgres_data:
-#  clickhouse_data:
-
+  postgres_data:
+  clickhouse_data:

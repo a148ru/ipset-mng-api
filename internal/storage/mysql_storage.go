@@ -16,7 +16,7 @@ type MySQLKeyStorage struct {
     db *sql.DB
 }
 func NewMySQLKeyStorage(cfg *config.Config) (*MySQLKeyStorage, error) {
-    dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4",
+    dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci",
         cfg.MySQLUsername,
         cfg.MySQLPassword,
         cfg.MySQLHost,
@@ -24,42 +24,41 @@ func NewMySQLKeyStorage(cfg *config.Config) (*MySQLKeyStorage, error) {
         cfg.MySQLDatabase,
     )
     
-    db, err := sql.Open("mysql", dsn)
-    if err != nil {
-        return nil, fmt.Errorf("failed to connect to mysql: %v", err)
+    var db *sql.DB
+    var err error
+    
+    // Пытаемся подключиться с повторными попытками
+    maxRetries := 30
+    for i := 0; i < maxRetries; i++ {
+        db, err = sql.Open("mysql", dsn)
+        if err != nil {
+            time.Sleep(2 * time.Second)
+            continue
+        }
+        
+        // Настраиваем пул соединений
+        db.SetMaxOpenConns(25)
+        db.SetMaxIdleConns(25)
+        db.SetConnMaxLifetime(5 * time.Minute)
+        
+        err = db.Ping()
+        if err == nil {
+            break
+        }
+        
+        fmt.Printf("Failed to ping MySQL (attempt %d/%d): %v\n", i+1, maxRetries, err)
+        time.Sleep(2 * time.Second)
     }
     
-    if err := db.Ping(); err != nil {
-        return nil, fmt.Errorf("failed to ping mysql: %v", err)
+    if err != nil {
+        return nil, fmt.Errorf("failed to connect to MySQL after %d attempts: %v", maxRetries, err)
     }
     
-    // Создаем базу данных если не существует
-    _, err = db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg.MySQLDatabase))
-    if err != nil {
-        return nil, fmt.Errorf("failed to create database: %v", err)
-    }
-    
-    // Используем созданную базу данных
-    _, err = db.Exec(fmt.Sprintf("USE %s", cfg.MySQLDatabase))
-    if err != nil {
-        return nil, fmt.Errorf("failed to use database: %v", err)
-    }
-    
-    // Создаем таблицу если не существует
-    _, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS auth_keys (
-            key VARCHAR(255) PRIMARY KEY,
-            created_at DATETIME,
-            expires_at DATETIME,
-            is_active BOOLEAN
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create auth_keys table: %v", err)
-    }
+    fmt.Println("Successfully connected to MySQL")
     
     return &MySQLKeyStorage{db: db}, nil
 }
+
 func (s *MySQLKeyStorage) GetKey(key string) (*models.AuthKey, error) {
     var authKey models.AuthKey
     err := s.db.QueryRow(
